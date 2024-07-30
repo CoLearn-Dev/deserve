@@ -27,7 +27,7 @@ class PagedMemory:
             self.avai_blocks.put(i)
 
 
-global_paged_memory = PagedMemory(11500, 256, main_device, main_dtype)
+global_paged_memory = PagedMemory(11600, 256, main_device, main_dtype)
 
 
 class PagedKVCache(KVCacheBase):
@@ -38,6 +38,7 @@ class PagedKVCache(KVCacheBase):
 
     def __init__(self, x: torch.Tensor, start_pos: int, main_device: torch.device):
         self.main_device = main_device
+        self.is_clear = False
         bsz, seqlen = x.shape[0], x.shape[1]
         length = (
             self.get_kv_cache_length(0, start_pos + seqlen)
@@ -53,7 +54,11 @@ class PagedKVCache(KVCacheBase):
         )
         for i in range(length):
             for j in range(bsz):
-                self.block_table[j, i] = global_paged_memory.avai_blocks.get()
+                try:
+                    blk = global_paged_memory.avai_blocks.get(block=False)
+                except queue.Empty:
+                    assert False, "No available block"
+                self.block_table[j, i] = blk
 
     def renew(
         self,
@@ -88,6 +93,9 @@ class PagedKVCache(KVCacheBase):
             self.block_table = block_table
 
     def clear(self) -> None:
+        if self.is_clear:
+            assert False, "Already cleared"
+        self.is_clear = True
         for row in self.block_table.tolist():
             for item in row:
                 global_paged_memory.avai_blocks.put(item)

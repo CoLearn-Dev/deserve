@@ -1,4 +1,5 @@
 import sys
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
@@ -6,11 +7,24 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
 from .model import loads
-from .worker import PlanStep, SamplingParams, Worker
+from .task import PlanStep, SamplingParams, TaskInfo
+from .worker import Worker
 
 app = FastAPI()
-worker = Worker(sys.argv[2], 64, "http://localhost:29980")
+worker = Worker(sys.argv[2], 48, "http://localhost:29980")
 runtime_executor = ThreadPoolExecutor(max_workers=64)
+
+
+@app.post("/batch_forward")
+async def batch_forward(request: Request) -> str:
+    body = await request.body()
+    tensors, metadata = loads(body)
+    runtime_executor.submit(
+        worker.batch_forward,
+        tensors["x"],
+        [TaskInfo.model_validate(task_info) for task_info in metadata["task_infos"]],
+    )
+    return "ok"
 
 
 @app.post("/forward")
