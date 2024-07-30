@@ -15,7 +15,7 @@ def del_tensor(t: torch.Tensor) -> None:
 
 class KVCacheBase(ABC):
     @abstractmethod
-    def renew(self, x: torch.Tensor, start_pos: int) -> None:
+    def renew(self, bsz: int, seqlen: int, start_pos: int) -> None:
         pass
 
     @abstractmethod
@@ -66,8 +66,7 @@ class KVCache(KVCacheBase):
         )
         self.main_device = main_device
 
-    def renew(self, x: torch.Tensor, start_pos: int) -> None:
-        bsz, seqlen = x.shape[0], x.shape[1]
+    def renew(self, bsz: int, seqlen: int, start_pos: int) -> None:
         if start_pos + seqlen > self.cache_k.shape[1]:
             length = self.get_kv_cache_length(self.cache_k.shape[1], start_pos + seqlen)
             cache_k = torch.zeros(

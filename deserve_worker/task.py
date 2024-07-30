@@ -44,13 +44,11 @@ class LayerForward:
         self,
         layer_storage: LayerStorage,
         h: torch.Tensor,
-        seqlen: int,
         task_data: TaskData,
         need_sample: bool,
     ):
         self.layer_storage = layer_storage
         self.h = h
-        self.seqlen = seqlen
         self.task_info = task_data
         self.need_sample = need_sample
 

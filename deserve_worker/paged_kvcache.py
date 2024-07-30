@@ -62,10 +62,10 @@ class PagedKVCache(KVCacheBase):
 
     def renew(
         self,
-        x: torch.Tensor,
+        bsz: int,
+        seqlen: int,
         start_pos: int,
     ) -> None:
-        bsz, seqlen = x.shape[0], x.shape[1]
         if (
             start_pos + seqlen
             > self.block_table.shape[1] * global_paged_memory.block_size
