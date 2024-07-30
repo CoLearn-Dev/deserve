@@ -78,22 +78,21 @@ class Worker:
         ptr = 0
         forwards = []
         begin = time.time()
+        plan = task_infos[0].plan
+        index = self.locate_in_plan(plan)
+        assert index is not None
+        layer_storage = global_layer_manager.get_layer_storage(
+            task_infos[0].plan[index].layers
+        )
+        xs_cuda = xs.to("cuda")
         for ptr, task_info in enumerate(task_infos):
-            x = xs[ptr : ptr + 1]
-            plan = task_infos[0].plan
-            index = self.locate_in_plan(plan)
-            assert index is not None
-            layer_storage = global_layer_manager.get_layer_storage(
-                task_infos[0].plan[index].layers
-            )
-            bsz, seqlen = x.shape[:2]  # currently bsz is not used
+            x_cuda = xs_cuda[ptr : ptr + 1]
             forwards.append(
                 LayerForward(
                     layer_storage=layer_storage,
-                    h=x.to("cuda"),
-                    seqlen=seqlen,
+                    h=x_cuda,
                     task_data=self.init_task_data(
-                        x,
+                        x_cuda,
                         index,
                         task_info,
                     ),
@@ -115,12 +114,10 @@ class Worker:
         if index is None:
             return None
 
-        bsz, seqlen = x.shape[:2]  # currently bsz is not used
         layer_storage = global_layer_manager.get_layer_storage(plan[index].layers)
         layer_forward = LayerForward(
             layer_storage=layer_storage,
             h=x.to("cuda"),
-            seqlen=seqlen,
             task_data=self.init_task_data(
                 x,
                 index,
@@ -203,7 +200,7 @@ class Worker:
             )
 
             if len(forward_tasks) > 0:
-                x = torch.cat(forward_tensors)
+                x = torch.cat(forward_tensors).to("cpu")
                 data = dumps(
                     {"x": x},
                     {

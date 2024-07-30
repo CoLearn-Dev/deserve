@@ -88,15 +88,14 @@ class ForwardEngine:
         q = self.handling_queue
         while True:
             forwards: list[LayerForward] = q.get()
-            begin = time.time()
             while True:
                 try:
                     news = q.get(block=False)
                     forwards.extend(news)
                 except queue.Empty:
                     break
-            prefill_tasks = [task for task in forwards if task.seqlen > 1]
-            decode_tasks = [task for task in forwards if task.seqlen == 1]
+            prefill_tasks = [task for task in forwards if task.h.shape[1] > 1]
+            decode_tasks = [task for task in forwards if task.h.shape[1] == 1]
             # print(
             #     f"prefill_tasks: {len(prefill_tasks)}, decode_tasks: {len(decode_tasks)}"
             # )
@@ -120,12 +119,15 @@ class ForwardEngine:
         with torch.inference_mode():
             layer_storage = tasks[0].layer_storage
             h = torch.cat([t.h for t in tasks])
-            bsz_list, start_pos_list = [1 for _ in tasks], [
-                t.task_info.start_pos for t in tasks
-            ]
+            bsz_list = []
+            start_pos_list = []
             for task in tasks:
+                bsz_list.append(1)
+                start_pos_list.append(task.task_info.start_pos)
                 for kvcache in task.task_info.kvcaches.values():
-                    kvcache.renew(task.h, task.task_info.start_pos)
+                    kvcache.renew(
+                        task.h.shape[0], task.h.shape[1], task.task_info.start_pos
+                    )
             return layer_storage.forward(
                 h,
                 bsz_list,
@@ -155,7 +157,7 @@ class ForwardEngine:
                 else:
                     next_token = torch.argmax(h[:, -1], dim=-1)
                     next_token = next_token.reshape(1, -1)
-                result.append(ResultBack(next_token.to("cpu"), task_info.task_id))
+                result.append(ResultBack(next_token, task_info.task_id))
             else:
-                result.append(ResultBack(h.to("cpu"), task_info.task_id))
+                result.append(ResultBack(h, task_info.task_id))
         self.sendback_queue.put(result)
