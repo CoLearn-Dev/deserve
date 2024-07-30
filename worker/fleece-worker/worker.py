@@ -631,53 +631,54 @@ class Worker:
                 merged_next_token = torch.cat(next_token_list)
                 self.send_forward(task.metadata["plan"][0][0], tensors={"payload": merged_next_token}, metadata=metadata_list)
         else:
+            if "worker_urls" in task_list[0].metadata and task_list[0].metadata["worker_urls"] is not None:
+                metadata_list[0]["worker_urls"] = task_list[0].metadata["worker_urls"]
             self.send_forward(task.metadata["plan"][task.metadata["step"]+1][0], tensors={"payload": merged_h}, metadata=metadata_list)
         return task_update_list
 
     def layer_forward_engine(self):
         q = self.layer_forward_engine_queue
-        while True: 
+        while True:
             q_buffered: list[list[LayerForward]] = [q.get()]
-            while True: 
-                try: 
+            while True:
+                try:
                     tasks = q.get(block=False)
                     q_buffered.append(tasks)
                 except queue.Empty:
                     break
             prefill_tasks_list = [tasks for tasks in q_buffered if tasks[0].seqlen > 1]
             decode_tasks_list = [tasks for tasks in q_buffered if tasks[0].seqlen == 1]
-            
+
             for tasks in prefill_tasks_list:
                 h = self.layer_forward_engine_step(tasks)
                 task_update_list = self.post_layer_forward_engine_step(tasks, h)
-                tmp_len = sum([len(task[4]) for task in task_update_list])
-                print(time.monotonic(), len(tasks), sum([task.bsz for task in tasks]), tmp_len)
+                batch_update_len = sum([len(task[4]) for task in task_update_list])
+                print(time.monotonic(), len(tasks), sum([task.bsz for task in tasks]), batch_update_len)
                 executor_forward.submit(
-                    self.tmptmp,
+                    self.batch_update,
                     task_update_list
                 )
-            
+
             decode_tasks_list.sort(key=lambda x: x[0].bsz, reverse=False)
-            while len(decode_tasks_list) > 0: 
+            while len(decode_tasks_list) > 0:
                 total_bsz = 0
                 task_list = []
-                for i in reversed(range(len(decode_tasks_list))): 
+                for i in reversed(range(len(decode_tasks_list))):
                     print(i)
                     cur_bsz = sum([task.bsz for task in decode_tasks_list[i]])
-                    if total_bsz + cur_bsz > MAX_TOTAL_BSZ: 
+                    if total_bsz + cur_bsz > MAX_TOTAL_BSZ:
                         continue
                     total_bsz += cur_bsz
                     task_list.extend(decode_tasks_list.pop(i))
                 h = self.layer_forward_engine_step(task_list)
                 task_update_list = self.post_layer_forward_engine_step(task_list, h)
-                tmp_len = sum([len(task[4]) for task in task_update_list])
-                print(time.monotonic(), len(task_list), sum([task.bsz for task in task_list]), tmp_len)
+                batch_update_len = sum([len(task[4]) for task in task_update_list])
+                print(time.monotonic(), len(task_list), sum([task.bsz for task in task_list]), batch_update_len)
                 executor_forward.submit(
-                    self.tmptmp,
+                    self.batch_update,
                     task_update_list
                 )
-                    
-                    
+
     def layer_forward_engine_old(self):
         q = self.layer_forward_engine_queue
         while True:
@@ -721,14 +722,14 @@ class Worker:
             task_update_list = self.post_layer_forward_engine_step(task_list, h)
             # torch.cuda.synchronize()
             # print("2", time.monotonic())
-            tmp_len = sum([len(task[4]) for task in task_update_list])
-            print(time.monotonic(), len(task_list), total_bsz, tmp_len)
+            batch_update_len = sum([len(task[4]) for task in task_update_list])
+            print(time.monotonic(), len(task_list), total_bsz, batch_update_len)
             executor_forward.submit(
-                self.tmptmp,
+                self.batch_update,
                 task_update_list
             )
 
-    def tmptmp(self, task_update_list):
+    def batch_update(self, task_update_list):
         req_list = []
         for task_update in task_update_list:
             # self.new_task_update(task_update[0], task_update[1], task_update[2], task_update[3], task_update[4])
@@ -841,6 +842,8 @@ class Worker:
             start = 0
             layers_forward_list = []
             plan = metadata_list[0]["plan"]
+            if "worker_urls" in metadata_list[0] and metadata_list[0]["worker_urls"] is not None:
+                self.worker_urls = metadata_list[0]["worker_urls"]
             metadata_list.pop(0)
             for i, task in enumerate(metadata_list):
                 index = task["step"]
@@ -921,9 +924,12 @@ class Worker:
                 task_manager_url: Optional[str] = None,
                 signature: Optional[str] = None,
                 timestamp: Optional[int] = None,
+                worker_urls: Dict = None,
                 ):
         try:
             # self.verify(task_manager_url, task_id, plan, timestamp, signature)
+            if worker_urls is not None:
+                self.worker_urls = worker_urls
 
             index = step
             is_new_task = round == 0
@@ -1014,6 +1020,7 @@ class Worker:
                 "task_manager_url": task_manager_url,
                 "signature": signature,
                 "timestamp": timestamp,
+                "worker_urls": worker_urls,
             }
             self.layers_forward(h, layer_names, bsz, is_new_task, round, start_pos, seqlen, kv_cache_dict, metadata)
             return

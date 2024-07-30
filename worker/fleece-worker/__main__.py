@@ -12,6 +12,7 @@ import json
 import torch
 import concurrent.futures
 from anyio.from_thread import BlockingPortal
+import uuid
 
 app = FastAPI()
 worker = Worker()
@@ -219,7 +220,8 @@ async def main() -> None:
                     tg.start_soon(uviserver.serve)
             await portal.sleep_until_stopped()
     else:
-        worker.worker_id = "local"
+        worker.worker_id = "local"+uuid.uuid4().hex[:8]
+        print("Worker ID: ", worker.worker_id)
         worker.start_layer_forward_engine()
         async with anyio.create_task_group() as tg:
             if worker_url != "none":

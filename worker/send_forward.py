@@ -3,7 +3,7 @@ from fleece_network import dumps
 import uuid
 
 plan_8b = [
-    ["local", [
+    ["locale8da5c97", [
         "llama-3-8b-instruct-slice/tok_embeddings",
         *[f"llama-3-8b-instruct-slice/layers.{i}" for i in range(0, 32)],
         "llama-3-8b-instruct-slice/norm",
@@ -11,12 +11,17 @@ plan_8b = [
     ]]
 ]
 
+worker_urls = {
+    "locale16a9d78": "http://127.0.0.1:8081",
+    "local7ead4b11": "http://127.0.0.1:8082"
+}
+
 plan_70b = [
-    ["4d902f27-8a42-4b9a-b7c4-67a6d3b3ed52", [
+    ["locale16a9d78", [
         "llama-3-70b-instruct-slice/tok_embeddings",
         *[f"llama-3-70b-instruct-slice/layers.{i}" for i in range(0, 40)],
     ]],
-    ["3b9669de-113d-48b5-8ec4-0ed4d26bc083", [
+    ["locale16a9d78", [
         *[f"llama-3-70b-instruct-slice/layers.{i}" for i in range(40, 80)],
         "llama-3-70b-instruct-slice/norm",
         "llama-3-70b-instruct-slice/output",
@@ -35,6 +40,7 @@ metadata = {
     "max_total_len": 1024,
     "temperature": 0,
     "payload": input,
+    "worker_urls": None,
 }
 
 data = dumps(tensors, metadata)
