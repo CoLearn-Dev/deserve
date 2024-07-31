@@ -1,15 +1,14 @@
+import itertools
 import queue
-import time
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
-from deserve_worker.task import LayerForward, ResultBack
-
-from .kvcache import KVCacheBase
+from .kvcache import KVCacheBase, main_device
 from .layer_storage import LayerStorage
 from .model import ENABLE_FLASH_ATTN
+from .task import BatchForward, BatchResult, LayerForward, ResultBack
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 
@@ -41,7 +40,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Te
     return freqs_cis
 
 
-global_freqs_cis = precompute_freqs_cis(128, 8192, 500000.0).to("cuda")
+global_freqs_cis = precompute_freqs_cis(128, 8192, 500000.0).to(main_device)
 
 
 def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
@@ -70,83 +69,90 @@ def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
     return next_token
 
 
-def trace(begin: float, msg: str) -> float:
-    end = time.time()
-    print(f"{msg}: {(end - begin)*1000:.3f}ms")
-    return end
-
-
 class ForwardEngine:
     def __init__(
         self, max_total_bsz: int, sendback_queue: queue.Queue[list[ResultBack]]
     ):
         self.max_total_bsz = max_total_bsz
         self.sendback_queue = sendback_queue
-        self.handling_queue = queue.Queue[list[LayerForward]]()
+        self.handling_queue = queue.Queue[BatchForward]()
 
     def run(self) -> None:
         q = self.handling_queue
         while True:
-            forwards: list[LayerForward] = q.get()
+            forwards: list[BatchForward] = [q.get()]
             while True:
                 try:
-                    news = q.get(block=False)
-                    forwards.extend(news)
+                    new = q.get(block=False)
+                    forwards.append(new)
                 except queue.Empty:
                     break
-            prefill_tasks = [task for task in forwards if task.h.shape[1] > 1]
-            decode_tasks = [task for task in forwards if task.h.shape[1] == 1]
-            # print(
-            #     f"prefill_tasks: {len(prefill_tasks)}, decode_tasks: {len(decode_tasks)}"
-            # )
+            prefill_tasks = [task for task in forwards if task.xs.shape[1] > 1]
+            decode_tasks = [task for task in forwards if task.xs.shape[1] == 1]
 
             for task in prefill_tasks:
-                h = self.forward([task])
-                self.process(h, [task])
+                h = self.forward(task)
+                self.process(h, task)
 
-            for i in range(0, len(decode_tasks), self.max_total_bsz):
-                to_decode = decode_tasks[
-                    i : min(i + self.max_total_bsz, len(decode_tasks))
-                ]
-                h = self.forward(to_decode)
-                self.process(h, to_decode)
+            print(
+                f"prefill_tasks: {len(prefill_tasks)}, decode_tasks: {sum(task.xs.shape[0] for task in decode_tasks)}"
+            )
 
-    def add_layer_forward(self, forwards: list[LayerForward]) -> None:
+            decode_tasks.sort(key=lambda task: task.xs.shape[0], reverse=False)
+            while len(decode_tasks) > 0:
+                total_bsz = 0
+                todo_tasks = []
+                for i in reversed(range(len(decode_tasks))):
+                    cur_bsz = decode_tasks[i].xs.shape[0]
+                    if total_bsz + cur_bsz > self.max_total_bsz:
+                        continue
+                    total_bsz += cur_bsz
+                    todo_tasks.append(decode_tasks.pop(i))
+                new_task_datas = []
+                for task in todo_tasks:
+                    new_task_datas.extend(task.task_datas)
+                new_xs = torch.cat([task.xs for task in todo_tasks])
+                new_task = BatchForward(
+                    xs=new_xs,
+                    layer_storage=todo_tasks[0].layer_storage,
+                    task_datas=new_task_datas,
+                    need_sample=todo_tasks[0].need_sample,
+                )
+                h = self.forward(new_task)
+                self.process(h, new_task)
+
+    def add_batch_forward(self, forwards: BatchForward) -> None:
         self.handling_queue.put(forwards)
 
-    def forward(self, tasks: list[LayerForward]) -> torch.Tensor:
+    def forward(self, tasks: BatchForward) -> torch.Tensor:
         # we need to check that all tasks share the same layer storage
         with torch.inference_mode():
-            layer_storage = tasks[0].layer_storage
-            h = torch.cat([t.h for t in tasks])
-            bsz_list = []
-            start_pos_list = []
-            for task in tasks:
-                bsz_list.append(1)
-                start_pos_list.append(task.task_info.start_pos)
-                for kvcache in task.task_info.kvcaches.values():
-                    kvcache.renew(
-                        task.h.shape[0], task.h.shape[1], task.task_info.start_pos
-                    )
-            return layer_storage.forward(
+            torch.cuda.synchronize()
+            layer_storage = tasks.layer_storage
+            h = tasks.xs
+            bsz_list = [1 for _ in range(len(tasks.task_datas))]
+            start_pos_list = [task.start_pos for task in tasks.task_datas]
+            kvcache_list = [task.kvcaches for task in tasks.task_datas]
+            result = layer_storage.forward(
                 h,
                 bsz_list,
                 start_pos_list,
                 global_freqs_cis,
-                [task.task_info.kvcaches for task in tasks],
+                kvcache_list,
             )
+            torch.cuda.synchronize()
+            return result
 
-    def process(self, merged_h: torch.Tensor, tasks: list[LayerForward]) -> None:
+    def process(self, merged_h: torch.Tensor, tasks: BatchForward) -> None:
         result: list[ResultBack] = []
-        for ptr, task in enumerate(tasks):
+        for ptr, task_data in enumerate(tasks.task_datas):
             h = merged_h[ptr : ptr + 1]
             _, seqlen = h.shape[:2]
-            task_info = task.task_info
-            task_info.start_pos += seqlen
-            if task.need_sample:
-                task_info.round += 1
-                sampling_params = task_info.sampling_params
-                if task_info.start_pos >= sampling_params.max_total_len:
+            task_data.start_pos += seqlen
+            if tasks.need_sample:
+                task_data.round += 1
+                sampling_params = task_data.sampling_params
+                if task_data.start_pos >= sampling_params.max_total_len:
                     next_token = torch.tensor([[EOS_TOKEN_ID]])
                 elif sampling_params.temperature > 0:
                     probs = torch.softmax(
@@ -157,7 +163,7 @@ class ForwardEngine:
                 else:
                     next_token = torch.argmax(h[:, -1], dim=-1)
                     next_token = next_token.reshape(1, -1)
-                result.append(ResultBack(next_token, task_info.task_id))
+                result.append(ResultBack(next_token, task_data.task_id))
             else:
-                result.append(ResultBack(h, task_info.task_id))
+                result.append(ResultBack(h, task_data.task_id))
         self.sendback_queue.put(result)

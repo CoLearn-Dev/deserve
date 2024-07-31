@@ -1,6 +1,5 @@
 import queue
 import threading
-import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -12,11 +11,20 @@ from pydantic import BaseModel
 from transformers import AutoTokenizer  # type: ignore
 
 from .forward_engine import ForwardEngine
-from .kvcache import KVCacheBase
+from .kvcache import KVCacheBase, main_device
 from .layer_storage import global_layer_manager
 from .model import dumps
 from .paged_kvcache import PagedKVCache, global_paged_memory
-from .task import LayerForward, PlanStep, ResultBack, SamplingParams, TaskData, TaskInfo
+from .task import (
+    BatchForward,
+    BatchResult,
+    LayerForward,
+    PlanStep,
+    ResultBack,
+    SamplingParams,
+    TaskData,
+    TaskInfo,
+)
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 STOP_TOKEN_IDS = [128001, 128009]
@@ -52,7 +60,7 @@ class Worker:
                 _, layer_name = full_layer_name.split("/")
                 if layer_name.startswith("layers."):
                     layer_id = int(layer_name.split(".")[1])
-                    kvcaches[layer_id] = PagedKVCache(x, 0, torch.device("cuda"))
+                    kvcaches[layer_id] = PagedKVCache(x, 0, main_device)
 
             # TODO: need double check whether request is repeated
             task_data = TaskData(
@@ -75,32 +83,20 @@ class Worker:
         xs: torch.Tensor,
         task_infos: list[TaskInfo],
     ) -> None:
-        ptr = 0
-        forwards = []
-        begin = time.time()
         plan = task_infos[0].plan
         index = self.locate_in_plan(plan)
         assert index is not None
         layer_storage = global_layer_manager.get_layer_storage(
             task_infos[0].plan[index].layers
         )
-        xs_cuda = xs.to("cuda")
-        for ptr, task_info in enumerate(task_infos):
-            x_cuda = xs_cuda[ptr : ptr + 1]
-            forwards.append(
-                LayerForward(
-                    layer_storage=layer_storage,
-                    h=x_cuda,
-                    task_data=self.init_task_data(
-                        x_cuda,
-                        index,
-                        task_info,
-                    ),
-                    need_sample=(index == len(plan) - 1),
-                )
+        task_datas = [
+            self.init_task_data(xs, index, task_info) for task_info in task_infos
+        ]
+        self.forward_engine.add_batch_forward(
+            BatchForward(
+                xs.to(main_device), layer_storage, task_datas, (index == len(plan) - 1)
             )
-        print("process time:", (time.time() - begin) * 1000)
-        self.forward_engine.add_layer_forward(forwards)
+        )
 
     def forward(
         self,
@@ -115,22 +111,24 @@ class Worker:
             return None
 
         layer_storage = global_layer_manager.get_layer_storage(plan[index].layers)
-        layer_forward = LayerForward(
+        layer_forward = BatchForward(
+            xs=x.to(main_device),
             layer_storage=layer_storage,
-            h=x.to("cuda"),
-            task_data=self.init_task_data(
-                x,
-                index,
-                TaskInfo(
-                    task_id=task_id,
-                    plan=plan,
-                    round=round,
-                    sampling_params=sampling_params,
-                ),
-            ),
+            task_datas=[
+                self.init_task_data(
+                    x,
+                    index,
+                    TaskInfo(
+                        task_id=task_id,
+                        plan=plan,
+                        round=round,
+                        sampling_params=sampling_params,
+                    ),
+                )
+            ],
             need_sample=(index == len(plan) - 1),
         )
-        self.forward_engine.add_layer_forward([layer_forward])
+        self.forward_engine.add_batch_forward(layer_forward)
 
     def relay(self) -> None:
         q = self.relay_queue
@@ -200,7 +198,7 @@ class Worker:
             )
 
             if len(forward_tasks) > 0:
-                x = torch.cat(forward_tensors).to("cpu")
+                x = torch.cat(forward_tensors)
                 data = dumps(
                     {"x": x},
                     {

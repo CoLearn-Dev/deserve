@@ -54,10 +54,7 @@ class PagedKVCache(KVCacheBase):
         )
         for i in range(length):
             for j in range(bsz):
-                try:
-                    blk = global_paged_memory.avai_blocks.get(block=False)
-                except queue.Empty:
-                    assert False, "No available block"
+                blk = global_paged_memory.avai_blocks.get(block=False)
                 self.block_table[j, i] = blk
 
     def renew(
