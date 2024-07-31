@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 from pydantic import BaseModel
@@ -65,7 +66,13 @@ class BatchForward:
 class BatchResult:
     xs: torch.Tensor
     task_ids: list[str]
-    done_ids: list[str]
+
+
+@dataclass
+class BatchUpdate:
+    tokens: list[torch.Tensor]
+    task_ids: list[str]
+    cancel_ids: list[str]
 
 
 @dataclass

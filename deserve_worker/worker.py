@@ -18,6 +18,7 @@ from .paged_kvcache import PagedKVCache, global_paged_memory
 from .task import (
     BatchForward,
     BatchResult,
+    BatchUpdate,
     LayerForward,
     PlanStep,
     ResultBack,
@@ -27,9 +28,6 @@ from .task import (
 )
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
-STOP_TOKEN_IDS = [128001, 128009]
-
-stop_tokens = torch.tensor(STOP_TOKEN_IDS)
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
@@ -39,7 +37,7 @@ class Worker:
         self.worker_id = worker_id
         self.controller_url = controller_url
         self.task_datas: dict[str, TaskData] = {}
-        self.relay_queue = queue.Queue[list[ResultBack]]()
+        self.relay_queue = queue.Queue[BatchResult | BatchUpdate]()
         self.forward_engine = ForwardEngine(max_total_bsz, self.relay_queue)
         threading.Thread(target=self.forward_engine.run, daemon=True).start()
         threading.Thread(target=self.relay, daemon=True).start()
@@ -133,76 +131,29 @@ class Worker:
     def relay(self) -> None:
         q = self.relay_queue
         while True:
-            results: list[ResultBack] = q.get()
-            while True:
-                try:
-                    tasks = q.get(block=False)
-                    results.extend(tasks)
-                except queue.Empty:
-                    break
-
-            updated_tasks = []
-            forward_tasks = []
-            forward_tensors = []
-            for result in results:
-                task_id = result.task_id
+            result = q.get()
+            if isinstance(result, BatchResult):
+                task_id = result.task_ids[0]
                 task_info = self.task_datas[task_id]
                 plan = task_info.plan
                 index = self.locate_in_plan(plan)
                 assert index is not None
-
-                cancel = False
-                if index == len(plan) - 1:
-                    tokens = result.x.tolist()
-
-                    updated_tasks.append(
-                        {
-                            "task_id": task_id,
-                            "output_tokens": tokens,
-                        }
-                    )
-
-                    if tokens[0][0] in STOP_TOKEN_IDS:
-                        cancel = True
-
                 next_index = (index + 1) % len(plan)
-                next_worker_url = task_info.plan[next_index].worker_url
-                if cancel:
-                    task_info = self.task_datas.pop(task_id)
-                    for kvcache in task_info.kvcaches.values():
-                        kvcache.clear()
-                    if next_index != len(plan) - 1:
-                        self.network_executor.submit(
-                            requests.post,
-                            f"{next_worker_url}/cancel",
-                            json={
-                                "task_id": task_id,
-                                "plan": [step.model_dump() for step in plan],
-                            },
-                        )
-                else:
-                    forward_tasks.append(
-                        {
-                            "task_id": task_id,
-                            "round": task_info.round,
-                            "plan": plan,
-                            "sampling_params": task_info.sampling_params,
-                        }
-                    )
-                    forward_tensors.append(result.x)
-
-            self.network_executor.submit(
-                requests.post,
-                f"{self.controller_url}/update_tasks",
-                json=updated_tasks,
-            )
-
-            if len(forward_tasks) > 0:
-                x = torch.cat(forward_tensors)
+                next_worker_url = plan[next_index].worker_url
                 data = dumps(
-                    {"x": x},
+                    {"x": result.xs},
                     {
-                        "task_infos": forward_tasks,
+                        "task_infos": [
+                            {
+                                "task_id": task_id,
+                                "round": self.task_datas[task_id].round,
+                                "plan": plan,
+                                "sampling_params": self.task_datas[
+                                    task_id
+                                ].sampling_params,
+                            }
+                            for task_id in result.task_ids
+                        ],
                     },
                 )
                 self.network_executor.submit(
@@ -210,6 +161,22 @@ class Worker:
                     f"{next_worker_url}/batch_forward",
                     data=data,
                 )
+            elif isinstance(result, BatchUpdate):
+                updated_tasks = []
+                for tokens, task_id in zip(result.tokens, result.task_ids):
+                    updated_tasks.append(
+                        {
+                            "task_id": task_id,
+                            "output_tokens": tokens.tolist(),
+                        }
+                    )
+                self.network_executor.submit(
+                    requests.post,
+                    f"{self.controller_url}/update_tasks",
+                    json=updated_tasks,
+                )
+                for task_id in result.cancel_ids:
+                    self.cancel(task_id, self.task_datas[task_id].plan)
 
     def cancel(self, task_id: str, plan: list[PlanStep]) -> None:
         index = next(
@@ -228,6 +195,6 @@ class Worker:
                 f"{plan[next_index].worker_url}/cancel",
                 json={
                     "task_id": task_id,
-                    "plan": plan,
+                    "plan": [step.model_dump() for step in plan],
                 },
             )
