@@ -13,7 +13,7 @@ from transformers import AutoTokenizer  # type: ignore
 from .forward_engine import ForwardEngine
 from .kvcache import KVCacheBase, main_device
 from .layer_storage import global_layer_manager
-from .model import dumps
+from .model.llama import dumps
 from .paged_kvcache import PagedKVCache, global_paged_memory
 from .task import (
     BatchForward,

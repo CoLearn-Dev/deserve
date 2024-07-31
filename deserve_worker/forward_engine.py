@@ -8,7 +8,7 @@ import torch
 
 from .kvcache import KVCacheBase, main_device
 from .layer_storage import LayerStorage
-from .model import ENABLE_FLASH_ATTN
+from .model.llama import ENABLE_FLASH_ATTN
 from .task import BatchForward, BatchResult, BatchUpdate, LayerForward, ResultBack
 
 EOS_TOKEN_ID = 128001  # for llama 3 only

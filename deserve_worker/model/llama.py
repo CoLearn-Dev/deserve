@@ -12,13 +12,13 @@ from torch import nn
 
 from deserve_worker.paged_kvcache import PagedKVCache
 
-from .kvcache import KVCache, KVCacheBase
+from ..kvcache import KVCache, KVCacheBase
 
 ENABLE_FLASH_ATTN = False
 try:
     from flash_attn import flash_attn_with_kvcache  # type: ignore
 
-    from .paged_kvcache import global_paged_memory
+    from ..paged_kvcache import global_paged_memory
 
     ENABLE_FLASH_ATTN = True
 except ImportError as e:
@@ -217,25 +217,25 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
-        self.wq = torch.nn.utils.skip_init(
+        self.wq = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
         )
-        self.wk = torch.nn.utils.skip_init(
+        self.wk = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             args.dim,
             self.n_kv_heads * self.head_dim,
             bias=False,
         )
-        self.wv = torch.nn.utils.skip_init(
+        self.wv = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             args.dim,
             self.n_kv_heads * self.head_dim,
             bias=False,
         )
-        self.wo = torch.nn.utils.skip_init(
+        self.wo = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             args.n_heads * self.head_dim,
             args.dim,
@@ -385,7 +385,7 @@ class Attention(nn.Module):
                 output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
                 output_list.append(output)
             output = torch.cat([x for x in output_list])
-        return self.wo(output)
+        return self.wo(output)  # type: ignore
 
 
 class FeedForward(nn.Module):
@@ -418,19 +418,19 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = torch.nn.utils.skip_init(
+        self.w1 = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             dim,
             hidden_dim,
             bias=False,
         )
-        self.w2 = torch.nn.utils.skip_init(
+        self.w2 = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             hidden_dim,
             dim,
             bias=False,
         )
-        self.w3 = torch.nn.utils.skip_init(
+        self.w3 = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             dim,
             hidden_dim,
@@ -439,7 +439,7 @@ class FeedForward(nn.Module):
 
     @torch.inference_mode()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))  # type: ignore
 
 
 class TransformerBlock(nn.Module):

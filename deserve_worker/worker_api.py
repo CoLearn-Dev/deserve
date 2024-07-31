@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
-from .model import loads
+from .model.llama import loads
 from .task import PlanStep, SamplingParams, TaskInfo
 from .worker import Worker
 
