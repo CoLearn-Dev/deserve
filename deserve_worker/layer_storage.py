@@ -6,7 +6,7 @@ import requests
 import torch
 
 from .kvcache import KVCacheBase, main_device
-from .model import ENABLE_FLASH_ATTN, ModelArgs, RMSNorm, TransformerBlock
+from .model.llama import ENABLE_FLASH_ATTN, ModelArgs, RMSNorm, TransformerBlock
 
 llama_2_7b_args = {
     "dim": 4096,
@@ -123,19 +123,19 @@ class LayerStorage:
             path = thread.result()
             model_name, layer_name = full_layer_name.split("/")
             if model_name.startswith("llama-2-7b"):
-                model_args = ModelArgs(**llama_2_7b_args)
+                model_args = ModelArgs(**llama_2_7b_args)  # type: ignore
             elif model_name.startswith("llama-2-13b"):
-                model_args = ModelArgs(**llama_2_13b_args)
+                model_args = ModelArgs(**llama_2_13b_args)  # type: ignore
             elif model_name.startswith("llama-2-70b"):
-                model_args = ModelArgs(**llama_2_70b_args)
+                model_args = ModelArgs(**llama_2_70b_args)  # type: ignore
             elif model_name.startswith("llama-3-8b"):
-                model_args = ModelArgs(**llama_3_8b_args)
+                model_args = ModelArgs(**llama_3_8b_args)  # type: ignore
             elif model_name.startswith("llama-3-70b"):
-                model_args = ModelArgs(**llama_3_70b_args)
+                model_args = ModelArgs(**llama_3_70b_args)  # type: ignore
             else:
                 raise NotImplementedError("Unknown model")
             if layer_name == "tok_embeddings":
-                l = torch.nn.utils.skip_init(
+                l = torch.nn.utils.skip_init(  # type: ignore
                     torch.nn.Embedding, model_args.vocab_size, model_args.dim
                 )
             elif layer_name.startswith("layer"):
@@ -143,7 +143,7 @@ class LayerStorage:
             elif layer_name == "norm":
                 l = RMSNorm(model_args.dim, eps=model_args.norm_eps)
             elif layer_name == "output":
-                l = torch.nn.utils.skip_init(
+                l = torch.nn.utils.skip_init(  # type: ignore
                     torch.nn.Linear,
                     model_args.dim,
                     model_args.vocab_size,
