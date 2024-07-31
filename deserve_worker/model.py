@@ -292,7 +292,7 @@ class Attention(nn.Module):
                 cache_seqlens, dtype=torch.int32, device=x.device
             )
             bsz = cache_seqlens_tch.shape[0]
-            paged_kv_cache_list: list[PagedKVCache] = kv_cache_list  # type: ignore
+            paged_kv_cache_list = cast(list[PagedKVCache], kv_cache_list)
 
             max_len = max([kvcache.shape()[1] for kvcache in paged_kv_cache_list])
             block_table = torch.zeros(

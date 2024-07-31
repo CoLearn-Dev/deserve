@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 import torch
 
-from .kvcache import KVCacheBase
+from .kvcache import KVCacheBase, main_device
 from .model import ENABLE_FLASH_ATTN, ModelArgs, RMSNorm, TransformerBlock
 
 llama_2_7b_args = {
@@ -80,7 +80,7 @@ class LayerManager:
             return self.layer_storage_map[frozen_layer_names]
 
 
-global_layer_manager = LayerManager(torch.device("cuda"))
+global_layer_manager = LayerManager(main_device)
 
 
 class LayerStorage:
@@ -163,6 +163,7 @@ class LayerStorage:
             del self.layers[full_layer_name]
             torch.cuda.empty_cache()
 
+    @torch.inference_mode()
     def forward(
         self,
         h: torch.Tensor,
@@ -171,18 +172,23 @@ class LayerStorage:
         global_freqs_cis: torch.Tensor,
         kv_cache_list: list[dict[int, KVCacheBase]],
     ) -> torch.Tensor:
+        _, seqlen = h.shape[:2]
         for full_layer_name in self.layers:
             _, layer_name = full_layer_name.split("/")
             if layer_name == "tok_embeddings":
                 h = self.layers[full_layer_name](h)
             elif layer_name.startswith("layers."):
                 layer_id = int(layer_name.split(".")[1])
+                cur_kv_cache_list = []
+                for i, kv_cache in enumerate(kv_cache_list):
+                    kv_cache[layer_id].renew(1, seqlen, start_pos_list[i])
+                    cur_kv_cache_list.append(kv_cache[layer_id])
                 h = self.layers[full_layer_name](
                     h,
                     bsz_list,
                     start_pos_list,
                     global_freqs_cis,
-                    [kv_cache[layer_id] for kv_cache in kv_cache_list],
+                    cur_kv_cache_list,
                 )
             elif layer_name == "norm":
                 h = self.layers[full_layer_name](h)

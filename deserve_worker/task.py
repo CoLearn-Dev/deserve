@@ -54,6 +54,21 @@ class LayerForward:
 
 
 @dataclass
+class BatchForward:
+    xs: torch.Tensor
+    layer_storage: LayerStorage
+    task_datas: list[TaskData]
+    need_sample: bool  # to be eliminated in the future, because we can infer this from LayerStorage
+
+
+@dataclass
+class BatchResult:
+    xs: torch.Tensor
+    task_ids: list[str]
+    done_ids: list[str]
+
+
+@dataclass
 class ResultBack:
     x: torch.Tensor
     task_id: str

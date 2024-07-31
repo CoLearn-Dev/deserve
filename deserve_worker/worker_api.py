@@ -1,5 +1,4 @@
 import sys
-import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
@@ -12,7 +11,7 @@ from .worker import Worker
 
 app = FastAPI()
 worker = Worker(sys.argv[2], 48, "http://localhost:29980")
-runtime_executor = ThreadPoolExecutor(max_workers=64)
+runtime_executor = ThreadPoolExecutor(max_workers=96)
 
 
 @app.post("/batch_forward")
