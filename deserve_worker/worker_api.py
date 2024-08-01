@@ -46,12 +46,15 @@ async def forward(request: Request) -> str:
 
 class CancelRequest(BaseModel):
     task_id: str
+    start_index: int
     plan: list[PlanStep]
 
 
 @app.post("/cancel")
 async def cancel(request: CancelRequest) -> str:
-    runtime_executor.submit(worker.cancel, request.task_id, request.plan)
+    runtime_executor.submit(
+        worker.cancel, request.task_id, request.start_index, request.plan
+    )
     return "ok"
 
 
