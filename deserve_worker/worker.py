@@ -7,21 +7,18 @@ from typing import Optional, cast
 
 import requests
 import torch
-from pydantic import BaseModel
 from transformers import AutoTokenizer  # type: ignore
 
 from .forward_engine import ForwardEngine
 from .kvcache import KVCacheBase, main_device
-from .layer_storage import global_layer_manager
+from .layer_storage import LayerManager
 from .model.llama import dumps
-from .paged_kvcache import PagedKVCache, global_paged_memory
+from .paged_kvcache import PagedKVCache
 from .task import (
     BatchForward,
     BatchResult,
     BatchUpdate,
-    LayerForward,
     PlanStep,
-    ResultBack,
     SamplingParams,
     TaskData,
     TaskInfo,
@@ -39,6 +36,7 @@ class Worker:
         self.task_datas: dict[str, TaskData] = {}
         self.relay_queue = queue.Queue[BatchResult | BatchUpdate]()
         self.forward_engine = ForwardEngine(max_total_bsz, self.relay_queue)
+        self.layer_manager = LayerManager(main_device)
         threading.Thread(target=self.forward_engine.run, daemon=True).start()
         threading.Thread(target=self.relay, daemon=True).start()
         self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
@@ -84,7 +82,7 @@ class Worker:
         plan = task_infos[0].plan
         index = self.locate_in_plan(plan)
         assert index is not None
-        layer_storage = global_layer_manager.get_layer_storage(
+        layer_storage = self.layer_manager.get_layer_storage(
             task_infos[0].plan[index].layers
         )
         task_datas = [
@@ -108,7 +106,7 @@ class Worker:
         if index is None:
             return None
 
-        layer_storage = global_layer_manager.get_layer_storage(plan[index].layers)
+        layer_storage = self.layer_manager.get_layer_storage(plan[index].layers)
         layer_forward = BatchForward(
             xs=x.to(main_device),
             layer_storage=layer_storage,

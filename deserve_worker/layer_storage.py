@@ -1,12 +1,12 @@
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import requests
 import torch
 
-from .kvcache import KVCacheBase, main_device
-from .model.llama import ENABLE_FLASH_ATTN, ModelArgs, RMSNorm, TransformerBlock
+from .kvcache import KVCacheBase
+from .model.llama import ModelArgs, RMSNorm, TransformerBlock
 
 llama_2_7b_args = {
     "dim": 4096,
@@ -67,39 +67,24 @@ class LayerManager:
         self.main_device = main_device
         self.network_executor = ThreadPoolExecutor(max_workers=80)
         self.cache_dir = os.path.expanduser("~/.cache/fleece-worker/models")
-        self.layer_storage_map: dict[frozenset[str], LayerStorage] = {}
+        self.layer_storages: dict[frozenset[str], LayerStorage] = {}
+        self.layers: dict[str, torch.nn.Module] = {}
         self.mutex = threading.Lock()
 
     def get_layer_storage(self, layer_names: list[str]) -> "LayerStorage":
         frozen_layer_names = frozenset(layer_names)
-        with self.mutex:
-            if frozen_layer_names not in self.layer_storage_map:
-                self.layer_storage_map[frozen_layer_names] = LayerStorage(
-                    layer_names, self.main_device
+        if frozen_layer_names not in self.layer_storages:
+            with self.mutex:
+                self.layer_storages[frozen_layer_names] = LayerStorage(
+                    self.preload_layers(layer_names), self.main_device
                 )
-            return self.layer_storage_map[frozen_layer_names]
-
-
-global_layer_manager = LayerManager(main_device)
-
-
-class LayerStorage:
-    def __init__(self, layer_names: list[str], main_device: torch.device):
-        self.layer_names = layer_names
-        self.main_device = main_device
-        self.layers: dict[str, torch.nn.Module] = {}
-
-        self.preload_layers(self.layer_names)
+        return self.layer_storages[frozen_layer_names]
 
     def fetch_layer(self, full_layer_name: str) -> str:
         model_name, layer_name = full_layer_name.split("/")
-        path = os.path.join(
-            global_layer_manager.cache_dir, model_name, f"{layer_name}.pt"
-        )
+        path = os.path.join(self.cache_dir, model_name, f"{layer_name}.pt")
         if not os.path.exists(path):  # TODO lock
-            os.makedirs(
-                os.path.join(global_layer_manager.cache_dir, model_name), exist_ok=True
-            )
+            os.makedirs(os.path.join(self.cache_dir, model_name), exist_ok=True)
             with requests.get(
                 f"https://huggingface.co/colearn/{model_name}/resolve/main/{layer_name}.pt",
                 stream=True,
@@ -110,14 +95,11 @@ class LayerStorage:
                         f.write(chunk)
         return path
 
-    def preload_layers(self, layer_names: list[str]) -> None:
-        threads = []
-        for full_layer_name in layer_names:
-            if full_layer_name in self.layers:
-                continue
-            thread = global_layer_manager.network_executor.submit(
-                self.fetch_layer, full_layer_name
-            )
+    def preload_layers(self, full_layer_names: list[str]) -> dict[str, torch.nn.Module]:
+        threads: list[tuple[str, Future[str]]] = []
+        result = {}
+        for full_layer_name in full_layer_names:
+            thread = self.network_executor.submit(self.fetch_layer, full_layer_name)
             threads.append((full_layer_name, thread))
         for full_layer_name, thread in threads:
             path = thread.result()
@@ -153,15 +135,20 @@ class LayerStorage:
                 raise NotImplementedError("Unknown layers")
             l.load_state_dict(torch.load(path, map_location="cpu"))
             l.to(self.main_device)
-            self.layers[full_layer_name] = l
             print("Loaded", full_layer_name)
+            self.layers[full_layer_name] = l
+        for full_layer_name in full_layer_names:
+            result[full_layer_name] = self.layers[full_layer_name]
+        return result
 
-    def unload_layers(self) -> None:
-        for full_layer_name in self.layer_names:
-            if full_layer_name not in self.layers:
-                continue  # TODO: continue or warning?
-            del self.layers[full_layer_name]
-            torch.cuda.empty_cache()
+
+class LayerStorage:
+    def __init__(self, layers: dict[str, torch.nn.Module], main_device: torch.device):
+        self.main_device = main_device
+        self.layers = layers
+
+    def clear(self) -> None:
+        self.layers.clear()
 
     @torch.inference_mode()
     def forward(
