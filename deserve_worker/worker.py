@@ -1,28 +1,19 @@
 import queue
 import threading
-import traceback
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import Optional, cast
 
 import requests
 import torch
 from transformers import AutoTokenizer  # type: ignore
 
-from .forward_engine import ForwardEngine
+from .command import BatchForward, BatchResult, BatchUpdate
+from .llm_engine import LLMEngine
 from .kvcache.kvcache import KVCache, main_device, main_dtype
-from .kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManager
+from .kvcache.paged_kvcache import PagedKVCacheManager
 from .layer_storage import LayerManager
 from .model.llama import dumps
-from .task import (
-    BatchForward,
-    BatchResult,
-    BatchUpdate,
-    PlanStep,
-    SamplingParams,
-    TaskData,
-    TaskInfo,
-)
+from .task import PlanStep, SamplingParams, TaskData, TaskInfo
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 
@@ -35,7 +26,7 @@ class Worker:
         self.controller_url = controller_url
         self.task_datas: dict[str, TaskData] = {}
         self.relay_queue = queue.Queue[BatchResult | BatchUpdate]()
-        self.forward_engine = ForwardEngine(max_total_bsz, self.relay_queue)
+        self.forward_engine = LLMEngine(max_total_bsz, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
         self.kvcache_manager = PagedKVCacheManager(11600, 256, main_device, main_dtype)
         threading.Thread(target=self.forward_engine.run, daemon=True).start()
