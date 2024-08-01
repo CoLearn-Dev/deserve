@@ -1,32 +1,15 @@
-from abc import ABC, abstractmethod
-
 import torch
 
-main_dtype = torch.float16
-main_device = torch.device("cuda")
-torch.set_default_dtype(main_dtype)  # type: ignore
+from deserve_worker.kvcache.kvcache import (
+    KV_CACHE_BLOCK_SIZE,
+    KVCache,
+    del_tensor,
+    main_device,
+    main_dtype,
+)
 
 
-def del_tensor(t: torch.Tensor) -> None:
-    t.detach()
-    t.grad = None
-    t.untyped_storage().resize_(0)
-
-
-class KVCacheBase(ABC):
-    @abstractmethod
-    def renew(self, bsz: int, seqlen: int, start_pos: int) -> None:
-        pass
-
-    @abstractmethod
-    def clear(self) -> None:
-        pass
-
-
-KV_CACHE_BLOCK_SIZE = 256
-
-
-class KVCache(KVCacheBase):
+class PackedKVCache(KVCache):
     def get_kv_cache_length(self, cur: int, seqlen: int) -> int:
         while cur < seqlen:
             cur += KV_CACHE_BLOCK_SIZE
@@ -66,7 +49,7 @@ class KVCache(KVCacheBase):
         )
         self.main_device = main_device
 
-    def renew(self, bsz: int, seqlen: int, start_pos: int) -> None:
+    def renew(self, bsz: int, seqlen: int, start_pos: int) -> bool:
         if start_pos + seqlen > self.cache_k.shape[1]:
             length = self.get_kv_cache_length(self.cache_k.shape[1], start_pos + seqlen)
             cache_k = torch.zeros(
@@ -95,6 +78,7 @@ class KVCache(KVCacheBase):
             del_tensor(self.cache_v)
             self.cache_k = cache_k
             self.cache_v = cache_v
+        return True
 
     def clear(self) -> None:
         del_tensor(self.cache_k)

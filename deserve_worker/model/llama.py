@@ -10,15 +10,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from deserve_worker.paged_kvcache import PagedKVCache
+from deserve_worker.kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManager
 
-from ..kvcache import KVCache, KVCacheBase
+from ..kvcache.kvcache import KVCache, KVCacheManager
+from ..kvcache.packed_kvcache import PackedKVCache
 
 ENABLE_FLASH_ATTN = False
 try:
     from flash_attn import flash_attn_with_kvcache  # type: ignore
-
-    from ..paged_kvcache import global_paged_memory
 
     ENABLE_FLASH_ATTN = True
 except ImportError as e:
@@ -266,7 +265,8 @@ class Attention(nn.Module):
         bsz_list: List[int],
         start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
-        kv_cache_list: list[KVCacheBase],
+        kvcache_list: list[KVCache],
+        kvcache_manager: KVCacheManager,
     ) -> torch.Tensor:
         """
         Forward pass of the attention module.
@@ -292,7 +292,7 @@ class Attention(nn.Module):
                 cache_seqlens, dtype=torch.int32, device=x.device
             )
             bsz = cache_seqlens_tch.shape[0]
-            paged_kv_cache_list = cast(list[PagedKVCache], kv_cache_list)
+            paged_kv_cache_list = cast(list[PagedKVCache], kvcache_list)
 
             max_len = max([kvcache.shape()[1] for kvcache in paged_kv_cache_list])
             block_table = torch.zeros(
@@ -311,10 +311,11 @@ class Attention(nn.Module):
             xv = xv_.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             cos = global_freqs_cis[0].type_as(xq)
             sin = global_freqs_cis[1].type_as(xq)
+            kvcache_manager = cast(PagedKVCacheManager, kvcache_manager)
             output = flash_attn_with_kvcache(
                 xq,
-                global_paged_memory.cache_k_paged,
-                global_paged_memory.cache_v_paged,
+                kvcache_manager.cache_k_paged,
+                kvcache_manager.cache_v_paged,
                 xk,
                 xv,
                 rotary_cos=cos,
@@ -341,7 +342,7 @@ class Attention(nn.Module):
                 start += bsz
 
                 start_pos = start_pos_list[i]
-                kv_cache: KVCache = cast(KVCache, kv_cache_list[i])
+                kv_cache: PackedKVCache = cast(PackedKVCache, kvcache_list[i])
                 cache_k, cache_v = kv_cache.cache_k, kv_cache.cache_v
 
                 freqs_cis = global_freqs_cis[start_pos : start_pos + seqlen]
@@ -484,7 +485,8 @@ class TransformerBlock(nn.Module):
         bsz_list: List[int],
         start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
-        kv_cache_list: list[KVCacheBase],
+        kvcache_list: list[KVCache],
+        kvcache_manager: KVCacheManager,
     ) -> torch.Tensor:
         """
         Perform a forward pass through the TransformerBlock.
@@ -504,7 +506,8 @@ class TransformerBlock(nn.Module):
             bsz_list,
             start_pos_list,
             global_freqs_cis,
-            kv_cache_list,
+            kvcache_list,
+            kvcache_manager,
         )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
