@@ -1,11 +1,8 @@
 from dataclasses import dataclass
-from typing import Optional
 
-import torch
 from pydantic import BaseModel
 
-from .kvcache.kvcache import KVCache, KVCacheManager
-from .layer_storage import LayerStorage
+from .kvcache.kvcache import KVCache
 
 
 class PlanStep(BaseModel):
@@ -38,45 +35,3 @@ class TaskData:
     """
     When flash attention is enabled, we use paged attention, otherwise the standard attention is adopted.
     """
-
-
-class LayerForward:
-    def __init__(
-        self,
-        layer_storage: LayerStorage,
-        h: torch.Tensor,
-        task_data: TaskData,
-        need_sample: bool,
-    ):
-        self.layer_storage = layer_storage
-        self.h = h
-        self.task_info = task_data
-        self.need_sample = need_sample
-
-
-@dataclass
-class BatchForward:
-    xs: torch.Tensor
-    layer_storage: LayerStorage
-    task_datas: list[TaskData]
-    kvcache_manager: KVCacheManager
-    need_sample: bool  # to be eliminated in the future, because we can infer this from LayerStorage
-
-
-@dataclass
-class BatchResult:
-    xs: torch.Tensor
-    task_ids: list[str]
-
-
-@dataclass
-class BatchUpdate:
-    tokens: list[torch.Tensor]
-    task_ids: list[str]
-    cancel_ids: list[str]
-
-
-@dataclass
-class ResultBack:
-    x: torch.Tensor
-    task_id: str

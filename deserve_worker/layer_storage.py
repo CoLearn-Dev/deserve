@@ -5,8 +5,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import requests
 import torch
 
+from deserve_worker.task import TaskData
+
 from .kvcache.kvcache import KVCache, KVCacheManager
 from .model.llama import ModelArgs, RMSNorm, TransformerBlock
+
+EOS_TOKEN_ID = 128001  # for llama 3 only
+STOP_TOKEN_IDS = [128001, 128009]
 
 llama_2_7b_args = {
     "dim": 4096,
@@ -60,6 +65,32 @@ llama_3_70b_args = {
     "vocab_size": 128256,
     "rope_theta": 500000.0,
 }
+
+
+def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
+    """
+    Perform top-p (nucleus) sampling on a probability distribution.
+
+    Args:
+        probs (torch.Tensor): Probability distribution tensor.
+        p (float): Probability threshold for top-p sampling.
+
+    Returns:
+        torch.Tensor: Sampled token indices.
+
+    Note:
+        Top-p sampling selects the smallest set of tokens whose cumulative probability mass
+        exceeds the threshold p. The distribution is renormalized based on the selected tokens.
+
+    """
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+    mask = probs_sum - probs_sort > p
+    probs_sort[mask] = 0.0
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    next_token = torch.multinomial(probs_sort, num_samples=1)
+    next_token = torch.gather(probs_idx, -1, next_token)
+    return next_token
 
 
 class LayerManager:
@@ -186,3 +217,37 @@ class LayerStorage:
             else:
                 raise NotImplementedError("Unknown layers")
         return h
+
+    @torch.inference_mode()
+    def sample(
+        self, merged_h: torch.Tensor, task_datas: list[TaskData]
+    ) -> tuple[list[torch.Tensor], list[str], list[torch.Tensor], list[str], list[str]]:
+        ongoing_tokens = []
+        ongoing_ids = []
+        all_tokens = []
+        all_ids = []
+        done_ids = []
+        for ptr, task_data in enumerate(task_datas):
+            h = merged_h[ptr : ptr + 1]
+            _, seqlen = h.shape[:2]
+            task_data.start_pos += seqlen
+            task_data.round += 1
+            sampling_params = task_data.sampling_params
+            if task_data.start_pos >= sampling_params.max_total_len:
+                next_token = torch.tensor([[EOS_TOKEN_ID]])
+            elif sampling_params.temperature > 0:
+                probs = torch.softmax(h[:, -1] / sampling_params.temperature, dim=-1)
+                next_token = sample_top_p(probs, sampling_params.top_p)
+                next_token = next_token.reshape(1, -1)
+            else:
+                next_token = torch.argmax(h[:, -1], dim=-1)
+                next_token = next_token.reshape(1, -1)
+            next_token = next_token.to("cpu")
+            all_ids.append(task_data.task_id)
+            all_tokens.append(next_token)
+            if next_token[0][0] in STOP_TOKEN_IDS:
+                done_ids.append(task_data.task_id)
+            else:
+                ongoing_ids.append(task_data.task_id)
+                ongoing_tokens.append(next_token)
+        return ongoing_tokens, ongoing_ids, all_tokens, all_ids, done_ids
