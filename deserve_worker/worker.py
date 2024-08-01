@@ -176,25 +176,30 @@ class Worker:
                     json=updated_tasks,
                 )
                 for task_id in result.cancel_ids:
-                    self.cancel(task_id, self.task_datas[task_id].plan)
+                    self.cancel(task_id, None, self.task_datas[task_id].plan)
 
-    def cancel(self, task_id: str, plan: list[PlanStep]) -> None:
+    def cancel(
+        self, task_id: str, start_index: Optional[int], plan: list[PlanStep]
+    ) -> None:
         index = next(
             (i for i, x in enumerate(plan) if x.worker_id == self.worker_id), None
         )
         if index is None:
             return
+        if start_index is None:
+            start_index = index
 
         task_info = self.task_datas.pop(task_id, None)
         if task_info is not None:
             for kvcache in task_info.kvcaches.values():
                 kvcache.clear()
         next_index = (index + 1) % len(plan)
-        if next_index != len(plan) - 1:
+        if next_index != start_index:
             requests.post(
                 f"{plan[next_index].worker_url}/cancel",
                 json={
                     "task_id": task_id,
+                    "start_index": index,
                     "plan": [step.model_dump() for step in plan],
                 },
             )
