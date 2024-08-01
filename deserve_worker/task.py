@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 from pydantic import BaseModel
 
-from .kvcache import KVCacheBase
+from .kvcache.kvcache import KVCache, KVCacheManager
 from .layer_storage import LayerStorage
 
 
@@ -34,7 +34,7 @@ class TaskData:
     plan: list[PlanStep]
     round: int
     sampling_params: SamplingParams
-    kvcaches: dict[int, KVCacheBase]
+    kvcaches: dict[int, KVCache]
     """
     When flash attention is enabled, we use paged attention, otherwise the standard attention is adopted.
     """
@@ -59,6 +59,7 @@ class BatchForward:
     xs: torch.Tensor
     layer_storage: LayerStorage
     task_datas: list[TaskData]
+    kvcache_manager: KVCacheManager
     need_sample: bool  # to be eliminated in the future, because we can infer this from LayerStorage
 
 

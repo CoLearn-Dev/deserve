@@ -5,7 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import requests
 import torch
 
-from .kvcache import KVCacheBase
+from .kvcache.kvcache import KVCache, KVCacheManager
 from .model.llama import ModelArgs, RMSNorm, TransformerBlock
 
 llama_2_7b_args = {
@@ -157,7 +157,8 @@ class LayerStorage:
         bsz_list: list[int],
         start_pos_list: list[int],
         global_freqs_cis: torch.Tensor,
-        kv_cache_list: list[dict[int, KVCacheBase]],
+        kvcache_list: list[dict[int, KVCache]],
+        kvcache_manager: KVCacheManager,
     ) -> torch.Tensor:
         _, seqlen = h.shape[:2]
         for full_layer_name in self.layers:
@@ -166,16 +167,17 @@ class LayerStorage:
                 h = self.layers[full_layer_name](h)
             elif layer_name.startswith("layers."):
                 layer_id = int(layer_name.split(".")[1])
-                cur_kv_cache_list = []
-                for i, kv_cache in enumerate(kv_cache_list):
+                cur_kvcache_list = []
+                for i, kv_cache in enumerate(kvcache_list):
                     kv_cache[layer_id].renew(1, seqlen, start_pos_list[i])
-                    cur_kv_cache_list.append(kv_cache[layer_id])
+                    cur_kvcache_list.append(kv_cache[layer_id])
                 h = self.layers[full_layer_name](
                     h,
                     bsz_list,
                     start_pos_list,
                     global_freqs_cis,
-                    cur_kv_cache_list,
+                    cur_kvcache_list,
+                    kvcache_manager,
                 )
             elif layer_name == "norm":
                 h = self.layers[full_layer_name](h)

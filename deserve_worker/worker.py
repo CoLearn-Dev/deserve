@@ -10,10 +10,10 @@ import torch
 from transformers import AutoTokenizer  # type: ignore
 
 from .forward_engine import ForwardEngine
-from .kvcache import KVCacheBase, main_device
+from .kvcache.kvcache import KVCache, main_device, main_dtype
+from .kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManager
 from .layer_storage import LayerManager
 from .model.llama import dumps
-from .paged_kvcache import PagedKVCache
 from .task import (
     BatchForward,
     BatchResult,
@@ -37,6 +37,7 @@ class Worker:
         self.relay_queue = queue.Queue[BatchResult | BatchUpdate]()
         self.forward_engine = ForwardEngine(max_total_bsz, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
+        self.kvcache_manager = PagedKVCacheManager(11600, 256, main_device, main_dtype)
         threading.Thread(target=self.forward_engine.run, daemon=True).start()
         threading.Thread(target=self.relay, daemon=True).start()
         self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
@@ -56,7 +57,9 @@ class Worker:
                 _, layer_name = full_layer_name.split("/")
                 if layer_name.startswith("layers."):
                     layer_id = int(layer_name.split(".")[1])
-                    kvcaches[layer_id] = PagedKVCache(x, 0, main_device)
+                    kvcaches[layer_id] = self.kvcache_manager.alloc(
+                        x.shape[0], x.shape[1]
+                    )
 
             # TODO: need double check whether request is repeated
             task_data = TaskData(
@@ -65,7 +68,7 @@ class Worker:
                 plan=task_info.plan,
                 round=0,
                 sampling_params=task_info.sampling_params,
-                kvcaches=cast(dict[int, KVCacheBase], kvcaches),
+                kvcaches=cast(dict[int, KVCache], kvcaches),
             )
             self.task_datas[task_info.task_id] = task_data
         else:
@@ -90,7 +93,11 @@ class Worker:
         ]
         self.forward_engine.add_batch_forward(
             BatchForward(
-                xs.to(main_device), layer_storage, task_datas, (index == len(plan) - 1)
+                xs=xs.to(main_device),
+                layer_storage=layer_storage,
+                task_datas=task_datas,
+                need_sample=(index == len(plan) - 1),
+                kvcache_manager=self.kvcache_manager,
             )
         )
 
@@ -123,6 +130,7 @@ class Worker:
                 )
             ],
             need_sample=(index == len(plan) - 1),
+            kvcache_manager=self.kvcache_manager,
         )
         self.forward_engine.add_batch_forward(layer_forward)
 

@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 
-from .kvcache import KVCacheBase, main_device
+from .kvcache.kvcache import KVCache, main_device
 from .layer_storage import LayerStorage
 from .model.llama import ENABLE_FLASH_ATTN
 from .task import BatchForward, BatchResult, BatchUpdate, LayerForward, ResultBack
@@ -114,11 +114,13 @@ class ForwardEngine:
                 for task in todo_tasks:
                     new_task_datas.extend(task.task_datas)
                 new_xs = torch.cat([task.xs for task in todo_tasks])
+                # TODO: check if all tasks share same information
                 new_task = BatchForward(
                     xs=new_xs,
                     layer_storage=todo_tasks[0].layer_storage,
                     task_datas=new_task_datas,
                     need_sample=todo_tasks[0].need_sample,
+                    kvcache_manager=todo_tasks[0].kvcache_manager,
                 )
                 h = self.forward(new_task)
                 self.process(h, new_task)
@@ -140,6 +142,7 @@ class ForwardEngine:
                 start_pos_list,
                 global_freqs_cis,
                 kvcache_list,
+                tasks.kvcache_manager,
             )
             return result
 
