@@ -58,7 +58,7 @@ class PagedKVCacheManager(KVCacheManager):
     def recycle(self, kvcache: KVCache) -> None:
         kvcache = cast(PagedKVCache, kvcache)
         self.block_bitmap[kvcache.block_table.flatten()] = True
-        kvcache.block_table = torch.empty(0, device=main_device, dtype=torch.int32)
+        kvcache.block_table = torch.empty((0, 0), device=main_device, dtype=torch.int32)
 
     def renew(self, kvcache: KVCache, bsz: int, seqlen: int, start_pos: int) -> bool:
         kvcache = cast(PagedKVCache, kvcache)

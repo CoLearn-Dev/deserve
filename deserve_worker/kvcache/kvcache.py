@@ -10,12 +10,6 @@ main_device = torch.device("cuda")
 torch.set_default_dtype(main_dtype)  # type: ignore
 
 
-def del_tensor(t: torch.Tensor) -> None:
-    t.detach()
-    t.grad = None
-    t.untyped_storage().resize_(0)
-
-
 class KVCache(ABC):
     @abstractmethod
     def renew(self, bsz: int, seqlen: int, start_pos: int) -> bool:

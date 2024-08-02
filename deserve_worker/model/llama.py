@@ -3,27 +3,19 @@
 import math
 import pickle
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple, cast
+from typing import Any, List, Mapping, Optional, Tuple, cast
 
 import safetensors.torch
 import torch
 import torch.nn.functional as F
+from flash_attn import flash_attn_with_kvcache  # type: ignore
 from torch import nn
 
 from deserve_worker.kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManager
+from deserve_worker.trace import ComponentId, LayerId, OpId
 
 from ..kvcache.kvcache import KVCache, KVCacheManager
 from ..kvcache.packed_kvcache import PackedKVCache
-
-ENABLE_FLASH_ATTN = False
-try:
-    from flash_attn import flash_attn_with_kvcache  # type: ignore
-
-    ENABLE_FLASH_ATTN = True
-except ImportError as e:
-    print(
-        "Package flash-attn is not found. Please install it for better performance. https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features"
-    )
 
 
 @dataclass
@@ -42,8 +34,15 @@ class ModelArgs:
     max_seq_len: int = 2048
 
 
+def trace_op(
+    traces: Optional[dict[OpId, torch.Tensor]], op_id: OpId, op_value: torch.Tensor
+) -> None:
+    if traces is not None:
+        traces[op_id] = op_value
+
+
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, component_id: ComponentId, dim: int, eps: float = 1e-6):
         """
         Initialize the RMSNorm normalization layer.
 
@@ -57,6 +56,7 @@ class RMSNorm(torch.nn.Module):
 
         """
         super().__init__()
+        self.component_id = component_id
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
@@ -74,7 +74,11 @@ class RMSNorm(torch.nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     @torch.inference_mode()
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        traces: Optional[dict[OpId, torch.Tensor]],
+    ) -> torch.Tensor:
         """
         Forward pass through the RMSNorm layer.
 
@@ -86,7 +90,10 @@ class RMSNorm(torch.nn.Module):
 
         """
         output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+        # trace_op(traces, self.component_id.with_op("output"), output)
+        result = output * self.weight
+        # trace_op(traces, self.component_id.with_op("weighted_output"), result)
+        return result
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -160,7 +167,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 class Attention(nn.Module):
     """Multi-head attention module."""
 
-    def __init__(self, args: ModelArgs):
+    def __init__(self, component_id: ComponentId, args: ModelArgs):
         """
         Initialize the Attention module.
 
@@ -182,6 +189,7 @@ class Attention(nn.Module):
 
         """
         super().__init__()
+        self.component_id = component_id
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         # model_parallel_size = fs_init.get_model_parallel_world_size()
         self.n_local_heads = args.n_heads  # // model_parallel_size
@@ -214,23 +222,6 @@ class Attention(nn.Module):
             bias=False,
         )
 
-        # self.cache_k = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_local_kv_heads,
-        #         self.head_dim,
-        #     )
-        # )
-        # self.cache_v = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_local_kv_heads,
-        #         self.head_dim,
-        #     )
-        # )
-
     @torch.inference_mode()
     def forward(
         self,
@@ -240,6 +231,7 @@ class Attention(nn.Module):
         global_freqs_cis: torch.Tensor,
         kvcache_list: list[KVCache],
         kvcache_manager: KVCacheManager,
+        traces: Optional[dict[OpId, torch.Tensor]],
     ) -> torch.Tensor:
         """
         Forward pass of the attention module.
@@ -257,7 +249,7 @@ class Attention(nn.Module):
         _, seqlen, _ = x.shape
         xq_, xk_, xv_ = self.wq(x), self.wk(x), self.wv(x)
 
-        if ENABLE_FLASH_ATTN:
+        if isinstance(kvcache_manager, PagedKVCacheManager):
             cache_seqlens = []
             for i, bsz in enumerate(bsz_list):
                 cache_seqlens += [start_pos_list[i]] * bsz
@@ -284,7 +276,6 @@ class Attention(nn.Module):
             xv = xv_.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             cos = global_freqs_cis[0].type_as(xq)
             sin = global_freqs_cis[1].type_as(xq)
-            kvcache_manager = cast(PagedKVCacheManager, kvcache_manager)
             output = flash_attn_with_kvcache(
                 xq,
                 kvcache_manager.cache_k_paged,
@@ -299,6 +290,7 @@ class Attention(nn.Module):
                 rotary_interleaved=True,
             )
             output = output.view(bsz, seqlen, -1)
+            return self.wo(output)  # type: ignore
         else:
             start = 0
             output_list = []
@@ -312,6 +304,9 @@ class Attention(nn.Module):
                 xv = xv_[start : start + bsz].view(
                     bsz, seqlen, self.n_local_kv_heads, self.head_dim
                 )
+                # trace_op(traces, self.component_id.with_op("xq"), xq)
+                # trace_op(traces, self.component_id.with_op("xk"), xk)
+                # trace_op(traces, self.component_id.with_op("xv"), xv)
                 start += bsz
 
                 start_pos = start_pos_list[i]
@@ -327,6 +322,8 @@ class Attention(nn.Module):
                     mask = torch.triu(mask, diagonal=start_pos + 1).type_as(x)
 
                 xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+                # trace_op(traces, self.component_id.with_op("xq_rotary"), xq)
+                # trace_op(traces, self.component_id.with_op("xk_rotary"), xk)
 
                 cache_k[:bsz, start_pos : start_pos + seqlen] = xk
                 cache_v[:bsz, start_pos : start_pos + seqlen] = xv
@@ -348,6 +345,7 @@ class Attention(nn.Module):
                 scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(
                     self.head_dim
                 )
+                # trace_op(traces, self.component_id.with_op("scores"), scores)
                 if mask is not None:
                     scores = (
                         scores + mask
@@ -356,15 +354,19 @@ class Attention(nn.Module):
                 output = torch.matmul(
                     scores, values
                 )  # (bs, n_local_heads, seqlen, head_dim)
+
                 output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
                 output_list.append(output)
             output = torch.cat([x for x in output_list])
-        return self.wo(output)  # type: ignore
+            result = self.wo(output)
+            # trace_op(traces, self.component_id.with_op("weighted_output"), result)
+            return result  # type: ignore
 
 
 class FeedForward(nn.Module):
     def __init__(
         self,
+        component_id: ComponentId,
         dim: int,
         hidden_dim: int,
         multiple_of: int,
@@ -386,6 +388,7 @@ class FeedForward(nn.Module):
 
         """
         super().__init__()
+        self.component_id = component_id
         hidden_dim = int(2 * hidden_dim / 3)
         # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
@@ -412,12 +415,85 @@ class FeedForward(nn.Module):
         )
 
     @torch.inference_mode()
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))  # type: ignore
+    def forward(
+        self, x: torch.Tensor, traces: Optional[dict[OpId, torch.Tensor]]
+    ) -> torch.Tensor:
+        w1 = F.silu(self.w1(x))
+        w3 = self.w3(x)
+        w2 = self.w2(w1 * w3)
+        # trace_op(traces, self.component_id.with_op("w1"), w1)
+        # trace_op(traces, self.component_id.with_op("w3"), w3)
+        # trace_op(traces, self.component_id.with_op("w2"), w2)
+
+        return w2 # type: ignore
+
+
+class TraceLinear(nn.Module):
+    def __init__(
+        self,
+        component_id: ComponentId,
+        in_features: int,
+        out_features: int,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        super().__init__()
+        self.component_id = component_id
+        self.linear = nn.Linear(
+            in_features, out_features, bias=False, device=device, dtype=dtype
+        )
+
+    @torch.inference_mode()
+    def forward(
+        self, x: torch.Tensor, traces: Optional[dict[OpId, torch.Tensor]]
+    ) -> torch.Tensor:
+        out = self.linear(x)
+        # trace_op(traces, self.component_id.with_op("output"), out)
+        return out  # type: ignore
+
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, Any],
+        strict: bool = True,
+        assign: bool = False,
+    ) -> torch.nn.modules.module._IncompatibleKeys:
+        return self.linear.load_state_dict(state_dict, strict, assign)  # type: ignore
+
+
+class TraceEmbedding(nn.Module):
+    def __init__(
+        self,
+        component_id: ComponentId,
+        num_embeddings: int,
+        embedding_dim: int,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        super().__init__()
+        self.component_id = component_id
+        self.embedding = nn.Embedding(
+            num_embeddings, embedding_dim, device=device, dtype=dtype
+        )
+
+    @torch.inference_mode()
+    def forward(
+        self, x: torch.Tensor, traces: Optional[dict[OpId, torch.Tensor]]
+    ) -> torch.Tensor:
+        out = self.embedding(x)
+        # trace_op(traces, self.component_id.with_op("output"), out)
+        return out  # type: ignore
+
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, Any],
+        strict: bool = True,
+        assign: bool = False,
+    ) -> torch.nn.modules.module._IncompatibleKeys:
+        return self.embedding.load_state_dict(state_dict, strict, assign)  # type: ignore
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, layer_id: LayerId, args: ModelArgs):
         """
         Initialize a TransformerBlock.
 
@@ -437,19 +513,24 @@ class TransformerBlock(nn.Module):
 
         """
         super().__init__()
+        self.layer_id = layer_id
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        self.attention = Attention(layer_id.with_component("attention"), args)
         self.feed_forward = FeedForward(
+            layer_id.with_component("feed_forward"),
             dim=args.dim,
             hidden_dim=4 * args.dim,
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
         )
-        # self.layer_id = layer_id
-        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
-        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.attention_norm = RMSNorm(
+            layer_id.with_component("attention_norm"), args.dim, eps=args.norm_eps
+        )
+        self.ffn_norm = RMSNorm(
+            layer_id.with_component("ffn_norm"), args.dim, eps=args.norm_eps
+        )
 
     @torch.inference_mode()
     def forward(
@@ -460,6 +541,7 @@ class TransformerBlock(nn.Module):
         global_freqs_cis: torch.Tensor,
         kvcache_list: list[KVCache],
         kvcache_manager: KVCacheManager,
+        traces: Optional[dict[OpId, torch.Tensor]],
     ) -> torch.Tensor:
         """
         Perform a forward pass through the TransformerBlock.
@@ -475,14 +557,19 @@ class TransformerBlock(nn.Module):
 
         """
         h = x + self.attention.forward(
-            self.attention_norm(x),
+            self.attention_norm(x, traces),
             bsz_list,
             start_pos_list,
             global_freqs_cis,
             kvcache_list,
             kvcache_manager,
+            traces,
         )
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
+        # trace_op(traces, self.layer_id.with_component("attention").with_op("res"), h)
+        out = h + self.feed_forward.forward(self.ffn_norm(h, traces), traces)
+        # trace_op(
+        # traces, self.layer_id.with_component("feed_forward").with_op("res"), out
+        # )
         return out
 
 

@@ -44,6 +44,24 @@ async def forward(request: Request) -> str:
     return "ok"
 
 
+@app.post("/trace")
+async def trace(request: Request) -> str:
+    try:
+        body = await request.body()
+        tensors, metadata = loads(body)
+        runtime_executor.submit(
+            worker.trace,
+            tensors["x"],
+            metadata["task_id"],
+            metadata["round"],
+            [PlanStep.model_validate(step) for step in metadata["plan"]],
+            SamplingParams.model_validate(metadata["sampling_params"]),
+        )
+    except Exception as e:
+        traceback.print_exc()
+    return "ok"
+
+
 class CancelRequest(BaseModel):
     task_id: str
     start_index: int
