@@ -1,14 +1,22 @@
 import os
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Optional
 
 import requests
 import torch
 
 from deserve_worker.task import TaskData
+from deserve_worker.trace import ComponentId, LayerId, OpId
 
 from .kvcache.kvcache import KVCache, KVCacheManager
-from .model.llama import ModelArgs, RMSNorm, TransformerBlock
+from .model.llama import (
+    ModelArgs,
+    RMSNorm,
+    TraceEmbedding,
+    TraceLinear,
+    TransformerBlock,
+)
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 STOP_TOKEN_IDS = [128001, 128009]
@@ -149,18 +157,25 @@ class LayerManager:
                 raise NotImplementedError("Unknown model")
             if layer_name == "tok_embeddings":
                 l = torch.nn.utils.skip_init(  # type: ignore
-                    torch.nn.Embedding, model_args.vocab_size, model_args.dim
+                    # torch.nn.Embedding,
+                    TraceEmbedding,
+                    ComponentId("tok_embeddings", "main"),
+                    model_args.vocab_size,
+                    model_args.dim,
                 )
             elif layer_name.startswith("layer"):
-                l = TransformerBlock(model_args)
+                l = TransformerBlock(LayerId(f"layer_{layer_name[6:]}"), model_args)
             elif layer_name == "norm":
-                l = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+                l = RMSNorm(
+                    ComponentId("norm", "main"), model_args.dim, eps=model_args.norm_eps
+                )
             elif layer_name == "output":
                 l = torch.nn.utils.skip_init(  # type: ignore
-                    torch.nn.Linear,
+                    # torch.nn.Linear,
+                    TraceLinear,
+                    ComponentId("output", "main"),
                     model_args.dim,
                     model_args.vocab_size,
-                    bias=False,
                 )
             else:
                 raise NotImplementedError("Unknown layers")
@@ -190,12 +205,14 @@ class LayerStorage:
         global_freqs_cis: torch.Tensor,
         kvcache_list: list[dict[int, KVCache]],
         kvcache_manager: KVCacheManager,
+        traces: Optional[dict[OpId, torch.Tensor]],
     ) -> torch.Tensor:
         _, seqlen = h.shape[:2]
         for full_layer_name in self.layers:
             _, layer_name = full_layer_name.split("/")
             if layer_name == "tok_embeddings":
-                h = self.layers[full_layer_name](h)
+                h = self.layers[full_layer_name](h, traces)
+                # h = self.layers[full_layer_name](h)
             elif layer_name.startswith("layers."):
                 layer_id = int(layer_name.split(".")[1])
                 cur_kvcache_list = []
@@ -209,11 +226,13 @@ class LayerStorage:
                     global_freqs_cis,
                     cur_kvcache_list,
                     kvcache_manager,
+                    traces,
                 )
             elif layer_name == "norm":
-                h = self.layers[full_layer_name](h)
+                h = self.layers[full_layer_name](h, traces)
             elif layer_name == "output":
-                h = self.layers[full_layer_name](h)
+                h = self.layers[full_layer_name](h, traces)
+                # h = self.layers[full_layer_name](h)
             else:
                 raise NotImplementedError("Unknown layers")
         return h
