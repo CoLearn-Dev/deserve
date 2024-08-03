@@ -15,7 +15,7 @@ from deserve_worker.kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManag
 from deserve_worker.trace import ComponentId, LayerId, OpId
 
 from ..kvcache.kvcache import KVCache, KVCacheManager
-from ..kvcache.packed_kvcache import PackedKVCache
+from ..kvcache.packed_kvcache import PackedKVCache, PackedKVCacheManager
 
 
 @dataclass
@@ -278,8 +278,8 @@ class Attention(nn.Module):
             sin = global_freqs_cis[1].type_as(xq)
             output = flash_attn_with_kvcache(
                 xq,
-                kvcache_manager.cache_k_paged,
-                kvcache_manager.cache_v_paged,
+                kvcache_manager.block_pool.block_ks,
+                kvcache_manager.block_pool.block_vs,
                 xk,
                 xv,
                 rotary_cos=cos,
@@ -292,6 +292,7 @@ class Attention(nn.Module):
             output = output.view(bsz, seqlen, -1)
             return self.wo(output)  # type: ignore
         else:
+            kvcache_manager = cast(PackedKVCacheManager, kvcache_manager)
             start = 0
             output_list = []
             for i, bsz in enumerate(bsz_list):
@@ -310,8 +311,16 @@ class Attention(nn.Module):
                 start += bsz
 
                 start_pos = start_pos_list[i]
+                # remember consecutive block table [bsz, len] corresponds to memory [bsz, len * block_size, 8, 128]
                 kv_cache: PackedKVCache = cast(PackedKVCache, kvcache_list[i])
-                cache_k, cache_v = kv_cache.cache_k, kv_cache.cache_v
+                csct_block_table = kv_cache.csct_block_table.flatten()
+                block_bsz, block_len = kv_cache.csct_block_table.shape[:2]
+                cache_k = kvcache_manager.block_pool.block_ks[
+                    csct_block_table[0] : csct_block_table[-1] + 1
+                ].view(block_bsz, block_len * kvcache_manager.block_size, 8, 128)
+                cache_v = kvcache_manager.block_pool.block_vs[
+                    csct_block_table[0] : csct_block_table[-1] + 1
+                ].view(block_bsz, block_len * kvcache_manager.block_size, 8, 128)
 
                 freqs_cis = global_freqs_cis[start_pos : start_pos + seqlen]
                 mask = None
@@ -425,7 +434,7 @@ class FeedForward(nn.Module):
         # trace_op(traces, self.component_id.with_op("w3"), w3)
         # trace_op(traces, self.component_id.with_op("w2"), w2)
 
-        return w2 # type: ignore
+        return w2  # type: ignore
 
 
 class TraceLinear(nn.Module):
