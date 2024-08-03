@@ -8,6 +8,7 @@ import requests
 import torch
 from transformers import AutoTokenizer  # type: ignore
 
+from deserve_worker.kvcache.block_pool import BlockPool
 from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager  # type: ignore
 
 from .command import BatchForward, BatchResult, BatchUpdate, SingleTrace, TraceResult
@@ -31,13 +32,10 @@ class Worker:
         self.relay_queue = queue.Queue[BatchResult | BatchUpdate | TraceResult]()
         self.llm_engine = LLMEngine(max_total_bsz, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
+        self.block_pool = BlockPool(11600, 256, main_device, main_dtype)
         # TODO: in future, different cache manager could allocate on same memory
-        self.paged_kvcache_manager = PagedKVCacheManager(
-            11600, 256, main_device, main_dtype
-        )
-        self.packed_kvcache_manager = PackedKVCacheManager(
-            0, 256, main_device, main_dtype
-        )
+        self.paged_kvcache_manager = PagedKVCacheManager(self.block_pool)
+        self.packed_kvcache_manager = PackedKVCacheManager(self.block_pool)
         threading.Thread(target=self.llm_engine.run, daemon=True).start()
         threading.Thread(target=self.relay, daemon=True).start()
         self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)

@@ -3,53 +3,28 @@ from typing import Optional, cast
 
 import torch
 
+from deserve_worker.kvcache.block_pool import BlockPool
+
 from .kvcache import KVCache, KVCacheManager, main_device, main_dtype
 
 
 class PagedKVCacheManager(KVCacheManager):
     def __init__(
         self,
-        num_blocks: int,
-        block_size: int,
-        main_device: torch.device,
-        main_dtype: torch.dtype,
+        block_pool: BlockPool,
     ):
-        self.num_blocks = num_blocks
-        self.block_size = block_size
-        self.cache_k_paged = torch.randn(
-            num_blocks, block_size, 8, 128, device=main_device, dtype=main_dtype
-        )
-        self.cache_v_paged = torch.randn(
-            num_blocks, block_size, 8, 128, device=main_device, dtype=main_dtype
-        )
-        self.block_bitmap = torch.zeros(
-            (num_blocks,), device=main_device, dtype=torch.bool
-        )
-        self.block_buffer = torch.arange(
-            0, num_blocks, device=main_device, dtype=torch.int32
-        )
+        self.block_pool = block_pool
 
     def get_kv_cache_length(self, cur: int, seqlen: int) -> int:
         while cur < seqlen:
-            cur += self.block_size
+            cur += self.block_pool.block_size
         return cur
-
-    def alloc_blocks(self, size: int) -> Optional[torch.Tensor]:
-        if size > self.block_buffer.shape[0]:
-            block_avails = torch.nonzero(self.block_bitmap)
-            self.block_bitmap[block_avails] = False
-            self.block_buffer = torch.cat([self.block_buffer, block_avails])
-        if size > self.block_buffer.shape[0]:
-            return None
-        result = self.block_buffer[:size]
-        self.block_buffer = self.block_buffer[size:]
-        return result
 
     def alloc(self, bsz: int, seqlen: int) -> Optional["PagedKVCache"]:
         len_token = self.get_kv_cache_length(0, seqlen)
-        len_block = len_token // self.block_size
+        len_block = len_token // self.block_pool.block_size
         total_block = len_block * bsz
-        blocks = self.alloc_blocks(total_block)
+        blocks = self.block_pool.alloc(total_block)
         if blocks is None:
             return None
         else:
@@ -57,20 +32,24 @@ class PagedKVCacheManager(KVCacheManager):
 
     def recycle(self, kvcache: KVCache) -> None:
         kvcache = cast(PagedKVCache, kvcache)
-        self.block_bitmap[kvcache.block_table.flatten()] = True
+        self.block_pool.recycle(kvcache.block_table.flatten())
         kvcache.block_table = torch.empty((0, 0), device=main_device, dtype=torch.int32)
 
     def renew(self, kvcache: KVCache, bsz: int, seqlen: int, start_pos: int) -> bool:
         kvcache = cast(PagedKVCache, kvcache)
-        if start_pos + seqlen > kvcache.block_table.shape[1] * self.block_size:
+        if (
+            start_pos + seqlen
+            > kvcache.block_table.shape[1] * self.block_pool.block_size
+        ):
             len_block = (
                 self.get_kv_cache_length(
-                    kvcache.block_table.shape[1] * self.block_size, start_pos + seqlen
+                    kvcache.block_table.shape[1] * self.block_pool.block_size,
+                    start_pos + seqlen,
                 )
-                // self.block_size
+                // self.block_pool.block_size
             )
             total_block = (len_block - kvcache.block_table.shape[1]) * bsz
-            blocks = self.alloc_blocks(total_block)
+            blocks = self.block_pool.alloc(total_block)
             if blocks is None:
                 return False
             else:
