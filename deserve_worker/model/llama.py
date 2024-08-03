@@ -90,9 +90,9 @@ class RMSNorm(torch.nn.Module):
 
         """
         output = self._norm(x.float()).type_as(x)
-        # trace_op(traces, self.component_id.with_op("output"), output)
+        trace_op(traces, self.component_id.with_op("output"), output)
         result = output * self.weight
-        # trace_op(traces, self.component_id.with_op("weighted_output"), result)
+        trace_op(traces, self.component_id.with_op("weighted_output"), result)
         return result
 
 
@@ -305,9 +305,9 @@ class Attention(nn.Module):
                 xv = xv_[start : start + bsz].view(
                     bsz, seqlen, self.n_local_kv_heads, self.head_dim
                 )
-                # trace_op(traces, self.component_id.with_op("xq"), xq)
-                # trace_op(traces, self.component_id.with_op("xk"), xk)
-                # trace_op(traces, self.component_id.with_op("xv"), xv)
+                trace_op(traces, self.component_id.with_op("xq"), xq)
+                trace_op(traces, self.component_id.with_op("xk"), xk)
+                trace_op(traces, self.component_id.with_op("xv"), xv)
                 start += bsz
 
                 start_pos = start_pos_list[i]
@@ -331,8 +331,8 @@ class Attention(nn.Module):
                     mask = torch.triu(mask, diagonal=start_pos + 1).type_as(x)
 
                 xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-                # trace_op(traces, self.component_id.with_op("xq_rotary"), xq)
-                # trace_op(traces, self.component_id.with_op("xk_rotary"), xk)
+                trace_op(traces, self.component_id.with_op("xq_rotary"), xq)
+                trace_op(traces, self.component_id.with_op("xk_rotary"), xk)
 
                 cache_k[:bsz, start_pos : start_pos + seqlen] = xk
                 cache_v[:bsz, start_pos : start_pos + seqlen] = xv
@@ -354,7 +354,7 @@ class Attention(nn.Module):
                 scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(
                     self.head_dim
                 )
-                # trace_op(traces, self.component_id.with_op("scores"), scores)
+                trace_op(traces, self.component_id.with_op("scores"), scores)
                 if mask is not None:
                     scores = (
                         scores + mask
@@ -368,7 +368,7 @@ class Attention(nn.Module):
                 output_list.append(output)
             output = torch.cat([x for x in output_list])
             result = self.wo(output)
-            # trace_op(traces, self.component_id.with_op("weighted_output"), result)
+            trace_op(traces, self.component_id.with_op("weighted_output"), result)
             return result  # type: ignore
 
 
@@ -430,9 +430,9 @@ class FeedForward(nn.Module):
         w1 = F.silu(self.w1(x))
         w3 = self.w3(x)
         w2 = self.w2(w1 * w3)
-        # trace_op(traces, self.component_id.with_op("w1"), w1)
-        # trace_op(traces, self.component_id.with_op("w3"), w3)
-        # trace_op(traces, self.component_id.with_op("w2"), w2)
+        trace_op(traces, self.component_id.with_op("w1"), w1)
+        trace_op(traces, self.component_id.with_op("w3"), w3)
+        trace_op(traces, self.component_id.with_op("w2"), w2)
 
         return w2  # type: ignore
 
@@ -457,7 +457,7 @@ class TraceLinear(nn.Module):
         self, x: torch.Tensor, traces: Optional[dict[OpId, torch.Tensor]]
     ) -> torch.Tensor:
         out = self.linear(x)
-        # trace_op(traces, self.component_id.with_op("output"), out)
+        trace_op(traces, self.component_id.with_op("output"), out)
         return out  # type: ignore
 
     def load_state_dict(
@@ -489,7 +489,7 @@ class TraceEmbedding(nn.Module):
         self, x: torch.Tensor, traces: Optional[dict[OpId, torch.Tensor]]
     ) -> torch.Tensor:
         out = self.embedding(x)
-        # trace_op(traces, self.component_id.with_op("output"), out)
+        trace_op(traces, self.component_id.with_op("output"), out)
         return out  # type: ignore
 
     def load_state_dict(
@@ -574,11 +574,11 @@ class TransformerBlock(nn.Module):
             kvcache_manager,
             traces,
         )
-        # trace_op(traces, self.layer_id.with_component("attention").with_op("res"), h)
+        trace_op(traces, self.layer_id.with_component("attention").with_op("res"), h)
         out = h + self.feed_forward.forward(self.ffn_norm(h, traces), traces)
-        # trace_op(
-        # traces, self.layer_id.with_component("feed_forward").with_op("res"), out
-        # )
+        trace_op(
+            traces, self.layer_id.with_component("feed_forward").with_op("res"), out
+        )
         return out
 
 
