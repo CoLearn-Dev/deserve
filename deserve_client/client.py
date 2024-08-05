@@ -58,13 +58,14 @@ def trace(model: str, prompt: str, entry_point: str = "http://localhost:19000"):
     if response.status_code != 200:
         typer.echo("Error")
         return
-    
-    tensors = {}    
+
+    tensors = {}
     for chunk in response.iter_content(chunk_size=None):
         if chunk:
             temp_tensors, _ = loads(chunk)
             tensors.update(temp_tensors)
-    print(list(tensors.keys())) 
+    print(list(tensors.keys()))
+
 
 @cli.command()
 def verify(model: str, prompt: str, entry_point: str = "http://localhost:19000"):
@@ -81,17 +82,17 @@ def verify(model: str, prompt: str, entry_point: str = "http://localhost:19000")
         if chunk:
             temp_tensors, _ = loads(chunk)
             tensors.update(temp_tensors)
-            
+
     traces = {OpId.from_str(k): v for k, v in tensors.items()}
     transformer = Transformer(llama_3_8b_args)
     tokens = tokenizer(prompt, return_tensors="pt")["input_ids"].to(main_device)
     result = transformer.forward(tokens, CheckCtx(0.03, traces))
     if isinstance(result, torch.Tensor):
         print("No difference found")
-    else: 
-        if not transformer.verify(tokens, VerifyCtx(result.op_id, 0.03, traces)): 
+    else:
+        if not transformer.verify(tokens, VerifyCtx(result.op_id, 0.03, traces)):
             print("Difference found for", result.op_id)
-        else: 
+        else:
             print("Difference found but verification failed")
 
 

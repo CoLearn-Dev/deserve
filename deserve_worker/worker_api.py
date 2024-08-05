@@ -1,8 +1,8 @@
 import argparse
-import uvicorn
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
+import uvicorn
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
