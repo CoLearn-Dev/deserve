@@ -1,6 +1,6 @@
 import queue
 import threading
-import traceback
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, cast
 
@@ -25,8 +25,11 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
 
 class Worker:
-    def __init__(self, worker_id: str, max_total_bsz: int, controller_url: str):
+    def __init__(
+        self, worker_id: str, worker_url: str, max_total_bsz: int, controller_url: str
+    ):
         self.worker_id = worker_id
+        self.worker_url = worker_url
         self.controller_url = controller_url
         self.task_datas: dict[str, TaskData] = {}
         self.relay_queue = queue.Queue[BatchResult | BatchUpdate | TraceResult]()
@@ -36,9 +39,11 @@ class Worker:
         # TODO: in future, different cache manager could allocate on same memory
         self.paged_kvcache_manager = PagedKVCacheManager(self.block_pool)
         self.packed_kvcache_manager = PackedKVCacheManager(self.block_pool)
+        self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
+
         threading.Thread(target=self.llm_engine.run, daemon=True).start()
         threading.Thread(target=self.relay, daemon=True).start()
-        self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
+        threading.Thread(target=self.heartbeat, daemon=True).start()
 
     def locate_in_plan(self, plan: list[PlanStep]) -> Optional[int]:
         return next(
@@ -248,19 +253,31 @@ class Worker:
                 index = self.locate_in_plan(plan)
                 assert index is not None
                 next_index = (index + 1) % len(plan)
-                next_worker_url = plan[next_index].worker_url
+                if next_index != 0:
+                    next_worker_url = plan[next_index].worker_url
+                    data = dumps(
+                        {"x": result.x},
+                        {
+                            "task_id": task_id,
+                            "round": self.task_datas[task_id].round,
+                            "plan": plan,
+                            "sampling_params": self.task_datas[task_id].sampling_params,
+                        },
+                    )
+                    self.network_executor.submit(
+                        requests.post,
+                        f"{next_worker_url}/trace",
+                        data=data,
+                    )
                 data = dumps(
-                    {"x": result.x},
+                    {str(key): value for key, value in result.trace.items()},
                     {
                         "task_id": task_id,
-                        "round": self.task_datas[task_id].round,
-                        "plan": plan,
-                        "sampling_params": self.task_datas[task_id].sampling_params,
                     },
                 )
                 self.network_executor.submit(
                     requests.post,
-                    f"{next_worker_url}/trace",
+                    f"{self.controller_url}/update_traces",
                     data=data,
                 )
 
@@ -289,3 +306,15 @@ class Worker:
                     "plan": [step.model_dump() for step in plan],
                 },
             )
+
+    def heartbeat(self):
+        while True:
+            self.network_executor.submit(
+                requests.post,
+                f"{self.controller_url}/heartbeat",
+                json={
+                    "worker_id": self.worker_id,
+                    "worker_url": self.worker_url,
+                },
+            )
+            time.sleep(1)
