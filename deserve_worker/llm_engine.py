@@ -128,6 +128,7 @@ class LLMEngine:
             self.post_forward(h, new_task)
 
     def handle_trace(self, tasks: list[SingleTrace]) -> None:
+        print(f"trace_tasks: {len(tasks)}")
         for task in tasks:
             traces: dict[OpId, torch.Tensor] = {}
             h = self.step_forward(

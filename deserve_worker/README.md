@@ -1,4 +1,4 @@
-# deserve worker 
+# DeServe Worker 
 
 ## How to run
 

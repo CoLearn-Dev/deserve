@@ -1,4 +1,5 @@
-import sys
+import argparse
+import uvicorn
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
@@ -10,7 +11,7 @@ from .task import PlanStep, SamplingParams, TaskInfo
 from .worker import Worker
 
 app = FastAPI()
-worker = Worker(sys.argv[2], 48, "http://localhost:29980")
+worker: Worker
 runtime_executor = ThreadPoolExecutor(max_workers=96)
 
 
@@ -77,6 +78,14 @@ async def cancel(request: CancelRequest) -> str:
 
 
 if __name__ == "__main__":
-    import uvicorn
+    parser = argparse.ArgumentParser()
+    parser.add_argument("id", type=str)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--controller-url", type=str)
+    args = parser.parse_args()
 
-    uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]))
+    worker = Worker(
+        args.id, f"http://localhost:{args.port}", args.batch_size, args.controller_url
+    )
+    uvicorn.run(app, host="127.0.0.1", port=args.port)
