@@ -31,6 +31,8 @@ token_channels: dict[str, queue.Queue[Optional[str]]] = {}
 trace_channels: dict[str, queue.Queue[dict[str, torch.Tensor]]] = {}
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
+STOP_TOKEN_IDS = [128001, 128009]
+
 
 def dumps(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> bytes:
     """
@@ -174,7 +176,10 @@ class OfflineCompleteRequest(BaseModel):
 def offline_complete(request: OfflineCompleteRequest) -> None:
     pass
 
-def relay_traces(channel: queue.Queue[dict[str, torch.Tensor]], total: int) -> Generator[bytes, None, None]:
+
+def relay_traces(
+    channel: queue.Queue[dict[str, torch.Tensor]], total: int
+) -> Generator[bytes, None, None]:
     cnt = 0
     while cnt < total:
         value = channel.get()
@@ -235,12 +240,16 @@ class UpdateTaskRequest(BaseModel):
 def update_tasks(requests: list[UpdateTaskRequest]) -> None:
     for request in requests:
         task_id = request.task_id
-        for token_id in request.output_tokens:
-            token = tokenizer.decode(token_id)
-            if task_id in token_channels:
-                token_channels[task_id].put(token)
+        for token_ids in request.output_tokens:
+            token_id = token_ids[0]
+            if token_id in STOP_TOKEN_IDS:
+                token_channels[task_id].put(None)
             else:
-                logger.warning(f"Task {task_id} not found")
+                token = tokenizer.decode(token_id)
+                if task_id in token_channels:
+                    token_channels[task_id].put(token)
+                else:
+                    logger.warning(f"Task {task_id} not found")
 
 
 @app.post("/update_traces")
