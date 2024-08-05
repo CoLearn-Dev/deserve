@@ -164,9 +164,7 @@ class LayerManager:
                     model_args.dim,
                 )
             elif layer_name.startswith("layer"):
-                l = TransformerBlock(
-                    LayerId(f"{int(layer_name[7:]):02}"), model_args
-                )
+                l = TransformerBlock(LayerId(f"{int(layer_name[7:]):02}"), model_args)
             elif layer_name == "norm":
                 l = RMSNorm(
                     ComponentId("norm", "main"), model_args.dim, eps=model_args.norm_eps

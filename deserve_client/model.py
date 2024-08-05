@@ -14,6 +14,7 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 torch.set_default_dtype(torch.float16)
 main_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 @dataclass
 class ModelArgs:
     dim: int = 4096
@@ -31,45 +32,47 @@ class ModelArgs:
 
 
 llama_3_8b_args = ModelArgs(
-        n_kv_heads=8,
-        vocab_size=128256,
-        multiple_of=1024,
-        ffn_dim_multiplier=1.3,
-        norm_eps=1e-5,
-        rope_theta=500000.0,
-    )
+    n_kv_heads=8,
+    vocab_size=128256,
+    multiple_of=1024,
+    ffn_dim_multiplier=1.3,
+    norm_eps=1e-5,
+    rope_theta=500000.0,
+)
 
 
 @dataclass
 class Diff:
     op_id: OpId
     diff: float
-    
+
+
 @dataclass
-class CheckCtx: 
-    threshold: float 
+class CheckCtx:
+    threshold: float
     traces: dict[OpId, torch.Tensor]
-    
+
     def check(self, op_id: OpId, x: torch.Tensor) -> torch.Tensor | Diff:
         y = self.traces[op_id].to(main_device)
         if torch.allclose(x, y, atol=self.threshold):
             return y
-        else: 
+        else:
             return Diff(op_id, torch.max(torch.abs(x - y)).item())
-    
-@dataclass 
-class VerifyCtx: 
-    op_id: OpId 
+
+
+@dataclass
+class VerifyCtx:
+    op_id: OpId
     threshold: float
-    traces: dict[OpId, torch.Tensor] 
-    
-    def get_trace(self, op_id: OpId) -> torch.Tensor: 
+    traces: dict[OpId, torch.Tensor]
+
+    def get_trace(self, op_id: OpId) -> torch.Tensor:
         return self.traces[op_id].to(main_device)
 
     def verify(self, x: torch.Tensor) -> bool:
         y = self.traces[self.op_id].to(main_device)
         return torch.allclose(x, y, atol=self.threshold)
-    
+
 
 class RMSNorm(nn.Module):
     def __init__(self, component_id: ComponentId, dim: int, eps: float = 1e-6):
@@ -85,23 +88,21 @@ class RMSNorm(nn.Module):
         op = ctx.op_id.op
         if op == "output":
             return ctx.verify(self._norm(x.float()).type_as(x))
-        else: 
+        else:
             output = ctx.get_trace(self.component_id.with_op("weighted_output"))
-            return ctx.verify(output * self.weight)    
-        
+            return ctx.verify(output * self.weight)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        ctx: CheckCtx
-    ) -> torch.Tensor | Diff:
-        output = ctx.check(self.component_id.with_op("output"), self._norm(x.float()).type_as(x))
+    def forward(self, x: torch.Tensor, ctx: CheckCtx) -> torch.Tensor | Diff:
+        output = ctx.check(
+            self.component_id.with_op("output"), self._norm(x.float()).type_as(x)
+        )
         if isinstance(output, Diff):
             return output
-        return ctx.check(self.component_id.with_op("weighted_output"), output * self.weight)
+        return ctx.check(
+            self.component_id.with_op("weighted_output"), output * self.weight
+        )
 
 
- 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
@@ -183,7 +184,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
-        ctx: VerifyCtx, 
+        ctx: VerifyCtx,
     ) -> bool:
         bsz, seqlen, _ = x.shape
         op = ctx.op_id.op
@@ -246,23 +247,32 @@ class Attention(nn.Module):
     ) -> torch.Tensor | Diff:
         bsz, seqlen, _ = x.shape
 
-        xq = ctx.check(self.component_id.with_op("xq"), self.wq(x).view(bsz, seqlen, self.n_local_heads, self.head_dim))
+        xq = ctx.check(
+            self.component_id.with_op("xq"),
+            self.wq(x).view(bsz, seqlen, self.n_local_heads, self.head_dim),
+        )
         if isinstance(xq, Diff):
             return xq
 
-        xk = ctx.check(self.component_id.with_op("xk"), self.wk(x).view(bsz, seqlen, self.n_local_kv_heads, self.head_dim))
+        xk = ctx.check(
+            self.component_id.with_op("xk"),
+            self.wk(x).view(bsz, seqlen, self.n_local_kv_heads, self.head_dim),
+        )
         if isinstance(xk, Diff):
             return xk
 
-        xv = ctx.check(self.component_id.with_op("xv"), self.wv(x).view(bsz, seqlen, self.n_local_kv_heads, self.head_dim))
+        xv = ctx.check(
+            self.component_id.with_op("xv"),
+            self.wv(x).view(bsz, seqlen, self.n_local_kv_heads, self.head_dim),
+        )
         if isinstance(xv, Diff):
             return xv
 
         xq_new, xk_new = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
         xq = ctx.check(self.component_id.with_op("xq_rotary"), xq_new)
         if isinstance(xq, Diff):
-            return xq 
-        
+            return xq
+
         xk = ctx.check(self.component_id.with_op("xk_rotary"), xk_new)
         if isinstance(xk, Diff):
             return xk
@@ -285,7 +295,9 @@ class Attention(nn.Module):
         )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
         scores_new = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
-            scores_new = scores_new + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores_new = (
+                scores_new + mask
+            )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores_new = F.softmax(scores_new.float(), dim=-1).type_as(xq)
 
         # check scores
@@ -293,7 +305,9 @@ class Attention(nn.Module):
         if isinstance(scores, Diff):
             return scores
 
-        output_new = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+        output_new = torch.matmul(
+            scores, values
+        )  # (bs, n_local_heads, seqlen, head_dim)
         output_new = output_new.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         output = ctx.check(self.component_id.with_op("output"), output_new)
         if isinstance(output, Diff):
@@ -351,18 +365,21 @@ class FeedForward(nn.Module):
         assert False
 
     def forward(
-        self, x: torch.Tensor, ctx: CheckCtx,
+        self,
+        x: torch.Tensor,
+        ctx: CheckCtx,
     ) -> torch.Tensor | Diff:
         # check w1, w3, w2
         w1 = ctx.check(self.component_id.with_op("w1"), F.silu(self.w1(x)))
         if isinstance(w1, Diff):
             return w1
-        
+
         w3 = ctx.check(self.component_id.with_op("w3"), self.w3(x))
         if isinstance(w3, Diff):
             return w3
-        
+
         return ctx.check(self.component_id.with_op("w2"), self.w2(w1 * w3))
+
 
 class TraceLinear(nn.Module):
     def __init__(
@@ -380,9 +397,7 @@ class TraceLinear(nn.Module):
         )
 
     @torch.inference_mode()
-    def forward(
-        self, x: torch.Tensor, ctx: CheckCtx
-    ) -> torch.Tensor | Diff:
+    def forward(self, x: torch.Tensor, ctx: CheckCtx) -> torch.Tensor | Diff:
         return ctx.check(self.component_id.with_op("output"), self.linear(x))
 
     def load_state_dict(
@@ -392,6 +407,7 @@ class TraceLinear(nn.Module):
         assign: bool = False,
     ) -> torch.nn.modules.module._IncompatibleKeys:
         return self.linear.load_state_dict(state_dict, strict, assign)  # type: ignore
+
 
 class TraceEmbedding(nn.Module):
     def __init__(
@@ -409,9 +425,7 @@ class TraceEmbedding(nn.Module):
         )
 
     @torch.inference_mode()
-    def forward(
-        self, x: torch.Tensor, ctx: CheckCtx
-    ) -> torch.Tensor | Diff:
+    def forward(self, x: torch.Tensor, ctx: CheckCtx) -> torch.Tensor | Diff:
         return ctx.check(self.component_id.with_op("output"), self.embedding(x))
 
     def load_state_dict(
@@ -421,7 +435,6 @@ class TraceEmbedding(nn.Module):
         assign: bool = False,
     ) -> torch.nn.modules.module._IncompatibleKeys:
         return self.embedding.load_state_dict(state_dict, strict, assign)  # type: ignore
-
 
 
 class TransformerBlock(nn.Module):
@@ -442,38 +455,47 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(
             layer_id.with_component("attention_norm"), args.dim, eps=args.norm_eps
         )
-        self.ffn_norm = RMSNorm(layer_id.with_component("ffn_norm"), args.dim, eps=args.norm_eps)
+        self.ffn_norm = RMSNorm(
+            layer_id.with_component("ffn_norm"), args.dim, eps=args.norm_eps
+        )
 
     def verify(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
-        ctx: VerifyCtx
+        ctx: VerifyCtx,
     ) -> bool:
         layer = ctx.op_id.layer
-        component = ctx.op_id.component 
+        component = ctx.op_id.component
         op = ctx.op_id.op
         if component == "feed_forward":
             if op == "res":
-                return ctx.verify(ctx.get_trace(OpId(layer, "attention", "res")) + ctx.get_trace(OpId(layer, "feed_forward", "w2")))
-            else: 
+                return ctx.verify(
+                    ctx.get_trace(OpId(layer, "attention", "res"))
+                    + ctx.get_trace(OpId(layer, "feed_forward", "w2"))
+                )
+            else:
                 return self.feed_forward.verify(
                     ctx.get_trace(OpId(layer, "ffn_norm", "weighted_output")), ctx
                 )
         elif component == "ffn_norm":
-            return self.ffn_norm.verify(ctx.get_trace(OpId(layer, "attention", "res")), ctx)
+            return self.ffn_norm.verify(
+                ctx.get_trace(OpId(layer, "attention", "res")), ctx
+            )
         elif component == "attention_norm":
             return self.attention_norm.verify(x, ctx)
         elif component == "attention":
-            if op == "res": 
-                return ctx.verify(x + ctx.get_trace(OpId(layer, "attention", "weighted_output")))
-            else: 
+            if op == "res":
+                return ctx.verify(
+                    x + ctx.get_trace(OpId(layer, "attention", "weighted_output"))
+                )
+            else:
                 return self.attention.verify(
                     ctx.get_trace(OpId(layer, "attention_norm", "weighted_output")),
                     freqs_cis,
                     mask,
-                    ctx
+                    ctx,
                 )
         assert False
 
@@ -492,7 +514,9 @@ class TransformerBlock(nn.Module):
         if isinstance(attn, Diff):
             return attn
 
-        h = ctx.check(self.layer_id.with_component("attention").with_op("res"), x + attn)
+        h = ctx.check(
+            self.layer_id.with_component("attention").with_op("res"), x + attn
+        )
         if isinstance(h, Diff):
             return h
 
@@ -504,7 +528,9 @@ class TransformerBlock(nn.Module):
         if isinstance(ffn, Diff):
             return ffn
 
-        return ctx.check(self.layer_id.with_component("feed_forward").with_op("res"), h + ffn) 
+        return ctx.check(
+            self.layer_id.with_component("feed_forward").with_op("res"), h + ffn
+        )
 
 
 class Transformer(nn.Module):
@@ -517,7 +543,10 @@ class Transformer(nn.Module):
         cache_dir = os.path.expanduser(cache_dir)
 
         self.tok_embeddings = torch.nn.utils.skip_init(
-            TraceEmbedding, ComponentId("tok_embeddings", "main"), params.vocab_size, params.dim
+            TraceEmbedding,
+            ComponentId("tok_embeddings", "main"),
+            params.vocab_size,
+            params.dim,
         )
         self.tok_embeddings.load_state_dict(
             torch.load(cache_dir + "tok_embeddings.pt", map_location="cpu")
@@ -533,7 +562,9 @@ class Transformer(nn.Module):
             layer.to(main_device)
             self.layers.append(layer)
 
-        self.norm = RMSNorm(ComponentId("norm", "main"), params.dim, eps=params.norm_eps)
+        self.norm = RMSNorm(
+            ComponentId("norm", "main"), params.dim, eps=params.norm_eps
+        )
         self.norm.load_state_dict(torch.load(cache_dir + "norm.pt", map_location="cpu"))
         self.norm.to(main_device)
         self.output = torch.nn.utils.skip_init(
@@ -551,9 +582,7 @@ class Transformer(nn.Module):
         )
 
     @torch.inference_mode()
-    def verify(
-        self, tokens: torch.Tensor, ctx: VerifyCtx
-    ) -> bool:
+    def verify(self, tokens: torch.Tensor, ctx: VerifyCtx) -> bool:
         _bsz, seqlen = tokens.shape
         layer = ctx.op_id.layer
         if layer.isdigit():
@@ -568,26 +597,30 @@ class Transformer(nn.Module):
             layer_int = int(layer)
             if layer_int < 0 or layer_int >= self.n_layers:
                 assert False
-                
-            if layer_int == 0: 
+
+            if layer_int == 0:
                 input = ctx.get_trace(OpId("tok_embeddings", "main", "output"))
-            else: 
-                input = ctx.get_trace(OpId(f"{layer_int - 1:02}", "feed_forward", "res"))
-                
+            else:
+                input = ctx.get_trace(
+                    OpId(f"{layer_int - 1:02}", "feed_forward", "res")
+                )
+
             return self.layers[layer_int].verify(input, self.freqs_cis, mask, ctx)
         elif layer == "tok_embeddings":
             return self.tok_embeddings.verify(tokens, ctx)
         elif layer == "norm":
             num_layers = self.n_layers
-            return self.norm.verify(ctx.get_trace(OpId(f"{num_layers - 1:02}", "feed_forward", "res")), ctx)
+            return self.norm.verify(
+                ctx.get_trace(OpId(f"{num_layers - 1:02}", "feed_forward", "res")), ctx
+            )
         elif layer == "output":
-            return self.output.verify(ctx.get_trace(OpId("norm", "main", "output")), ctx)
+            return self.output.verify(
+                ctx.get_trace(OpId("norm", "main", "output")), ctx
+            )
         assert False
 
     @torch.inference_mode()
-    def forward(
-        self, tokens: torch.Tensor, ctx: CheckCtx
-    ) -> torch.Tensor | Diff:
+    def forward(self, tokens: torch.Tensor, ctx: CheckCtx) -> torch.Tensor | Diff:
         _bsz, seqlen = tokens.shape
 
         h = self.tok_embeddings.forward(tokens, ctx)
