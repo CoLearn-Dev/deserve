@@ -138,8 +138,9 @@ class LayerManager:
         threads: list[tuple[str, Future[str]]] = []
         result = {}
         for full_layer_name in full_layer_names:
-            thread = self.network_executor.submit(self.fetch_layer, full_layer_name)
-            threads.append((full_layer_name, thread))
+            if full_layer_name not in self.layers:
+                thread = self.network_executor.submit(self.fetch_layer, full_layer_name)
+                threads.append((full_layer_name, thread))
         for full_layer_name, thread in threads:
             path = thread.result()
             model_name, layer_name = full_layer_name.split("/")
