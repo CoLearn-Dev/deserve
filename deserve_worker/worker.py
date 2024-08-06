@@ -8,8 +8,8 @@ import requests
 import torch
 from transformers import AutoTokenizer  # type: ignore
 
-from deserve_worker.kvcache.block_pool import BlockPool
 from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager  # type: ignore
+from deserve_worker.kvcache.page_pool import PagePool
 
 from .command import BatchForward, BatchResult, BatchUpdate, SingleTrace, TraceResult
 from .kvcache.kvcache import KVCache, main_device, main_dtype
@@ -35,7 +35,7 @@ class Worker:
         self.relay_queue = queue.Queue[BatchResult | BatchUpdate | TraceResult]()
         self.llm_engine = LLMEngine(max_total_bsz, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
-        self.block_pool = BlockPool(11600, 256, main_device, main_dtype)
+        self.block_pool = PagePool(40, 290, 256, main_device, main_dtype)
         # TODO: in future, different cache manager could allocate on same memory
         self.paged_kvcache_manager = PagedKVCacheManager(self.block_pool)
         self.packed_kvcache_manager = PackedKVCacheManager(self.block_pool)
@@ -55,15 +55,6 @@ class Worker:
         self, x: torch.Tensor, index: int, task_info: TaskInfo
     ) -> TaskData:
         if task_info.round == 0:
-            kvcaches = {}
-            for full_layer_name in task_info.plan[index].layers:
-                _, layer_name = full_layer_name.split("/")
-                if layer_name.startswith("layers."):
-                    layer_id = int(layer_name.split(".")[1])
-                    kvcaches[layer_id] = self.paged_kvcache_manager.alloc(
-                        x.shape[0], x.shape[1]
-                    )
-
             # TODO: need double check whether request is repeated
             task_data = TaskData(
                 task_id=task_info.task_id,
@@ -71,7 +62,9 @@ class Worker:
                 plan=task_info.plan,
                 round=0,
                 sampling_params=task_info.sampling_params,
-                kvcaches=cast(dict[int, KVCache], kvcaches),
+                kvcache=cast(
+                    KVCache, self.paged_kvcache_manager.alloc(x.shape[0], x.shape[1])
+                ),
             )
             self.task_datas[task_info.task_id] = task_data
         else:
@@ -84,22 +77,15 @@ class Worker:
         self, x: torch.Tensor, index: int, task_info: TaskInfo
     ) -> TaskData:
         if task_info.round == 0:
-            kvcaches = {}
-            for full_layer_name in task_info.plan[index].layers:
-                _, layer_name = full_layer_name.split("/")
-                if layer_name.startswith("layers."):
-                    layer_id = int(layer_name.split(".")[1])
-                    kvcaches[layer_id] = self.packed_kvcache_manager.alloc(
-                        x.shape[0], x.shape[1]
-                    )
-
             task_data = TaskData(
                 task_id=task_info.task_id,
                 start_pos=0,
                 plan=task_info.plan,
                 round=0,
                 sampling_params=task_info.sampling_params,
-                kvcaches=cast(dict[int, KVCache], kvcaches),
+                kvcache=cast(
+                    KVCache, self.packed_kvcache_manager.alloc(x.shape[0], x.shape[1])
+                ),
             )
             self.task_datas[task_info.task_id] = task_data
         else:
@@ -294,8 +280,7 @@ class Worker:
 
         task_info = self.task_datas.pop(task_id, None)
         if task_info is not None:
-            for kvcache in task_info.kvcaches.values():
-                kvcache.clear()
+            task_info.kvcache.clear()
         next_index = (index + 1) % len(plan)
         if next_index != start_index:
             requests.post(

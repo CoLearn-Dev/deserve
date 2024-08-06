@@ -11,11 +11,11 @@ import torch.nn.functional as F
 from flash_attn import flash_attn_with_kvcache  # type: ignore
 from torch import nn
 
-from deserve_worker.kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManager
+from deserve_worker.kvcache.context import ForwardCtx
+from deserve_worker.kvcache.paged_kvcache import PagedForwardCtx, PagedKVCacheManager
 from deserve_worker.trace import ComponentId, LayerId, OpId
 
-from ..kvcache.kvcache import KVCache, KVCacheManager
-from ..kvcache.packed_kvcache import PackedKVCache, PackedKVCacheManager
+from ..kvcache.packed_kvcache import PackedForwardCtx, PackedKVCacheManager
 
 
 @dataclass
@@ -226,12 +226,8 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        bsz_list: List[int],
-        start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
-        kvcache_list: list[KVCache],
-        kvcache_manager: KVCacheManager,
-        traces: Optional[dict[OpId, torch.Tensor]],
+        ctx: ForwardCtx,
     ) -> torch.Tensor:
         """
         Forward pass of the attention module.
@@ -246,31 +242,12 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-        _, seqlen, _ = x.shape
+        bsz, seqlen = x.shape[:2]
         xq_, xk_, xv_ = self.wq(x), self.wk(x), self.wv(x)
 
-        if isinstance(kvcache_manager, PagedKVCacheManager):
-            cache_seqlens = []
-            for i, bsz in enumerate(bsz_list):
-                cache_seqlens += [start_pos_list[i]] * bsz
-            cache_seqlens_tch = torch.tensor(
-                cache_seqlens, dtype=torch.int32, device=x.device
-            )
-            bsz = cache_seqlens_tch.shape[0]
-            paged_kv_cache_list = cast(list[PagedKVCache], kvcache_list)
+        if isinstance(ctx, PagedForwardCtx):
+            paged_kvcache_manager = cast(PagedKVCacheManager, ctx.kvcache_manager)
 
-            max_len = max([kvcache.shape()[1] for kvcache in paged_kv_cache_list])
-            block_table = torch.zeros(
-                (bsz, max_len), dtype=torch.int32, device=x.device
-            )
-            start = 0
-            for i, bsz in enumerate(bsz_list):
-                block_table[
-                    start : start + bsz, : paged_kv_cache_list[i].shape()[1]
-                ] = paged_kv_cache_list[i].block_table
-                start += bsz
-
-            bsz = cache_seqlens_tch.shape[0]
             xq = xq_.view(bsz, seqlen, self.n_local_heads, self.head_dim)
             xk = xk_.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             xv = xv_.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
@@ -278,24 +255,25 @@ class Attention(nn.Module):
             sin = global_freqs_cis[1].type_as(xq)
             output = flash_attn_with_kvcache(
                 xq,
-                kvcache_manager.block_pool.block_ks,
-                kvcache_manager.block_pool.block_vs,
+                paged_kvcache_manager.page_pool.pages_k[ctx.layer_id],
+                paged_kvcache_manager.page_pool.pages_v[ctx.layer_id],
                 xk,
                 xv,
                 rotary_cos=cos,
                 rotary_sin=sin,
-                cache_seqlens=cache_seqlens_tch,
-                block_table=block_table,
+                cache_seqlens=ctx.start_pos_list,
+                block_table=ctx.block_table,
                 causal=True,
                 rotary_interleaved=True,
             )
             output = output.view(bsz, seqlen, -1)
             return self.wo(output)  # type: ignore
         else:
-            kvcache_manager = cast(PackedKVCacheManager, kvcache_manager)
+            ctx = cast(PackedForwardCtx, ctx)
+            packed_kvcache_manager = cast(PackedKVCacheManager, ctx.kvcache_manager)
             start = 0
             output_list = []
-            for i, bsz in enumerate(bsz_list):
+            for i, start_pos in enumerate(ctx.start_pos_list):
                 xq = xq_[start : start + bsz].view(
                     bsz, seqlen, self.n_local_heads, self.head_dim
                 )
@@ -305,22 +283,19 @@ class Attention(nn.Module):
                 xv = xv_[start : start + bsz].view(
                     bsz, seqlen, self.n_local_kv_heads, self.head_dim
                 )
-                trace_op(traces, self.component_id.with_op("xq"), xq)
-                trace_op(traces, self.component_id.with_op("xk"), xk)
-                trace_op(traces, self.component_id.with_op("xv"), xv)
+                trace_op(ctx.traces, self.component_id.with_op("xq"), xq)
+                trace_op(ctx.traces, self.component_id.with_op("xk"), xk)
+                trace_op(ctx.traces, self.component_id.with_op("xv"), xv)
                 start += bsz
 
-                start_pos = start_pos_list[i]
                 # remember consecutive block table [bsz, len] corresponds to memory [bsz, len * block_size, 8, 128]
-                kv_cache: PackedKVCache = cast(PackedKVCache, kvcache_list[i])
-                csct_block_table = kv_cache.csct_block_table.flatten()
-                block_bsz, block_len = kv_cache.csct_block_table.shape[:2]
-                cache_k = kvcache_manager.block_pool.block_ks[
-                    csct_block_table[0] : csct_block_table[-1] + 1
-                ].view(block_bsz, block_len * kvcache_manager.block_size, 8, 128)
-                cache_v = kvcache_manager.block_pool.block_vs[
-                    csct_block_table[0] : csct_block_table[-1] + 1
-                ].view(block_bsz, block_len * kvcache_manager.block_size, 8, 128)
+                begin, end = ctx.range_list[i]
+                cache_k = packed_kvcache_manager.page_pool.pages_k[ctx.layer_id][
+                    begin : end + 1
+                ].view(1, (end - begin + 1) * packed_kvcache_manager.block_size, 8, 128)
+                cache_v = packed_kvcache_manager.page_pool.pages_v[ctx.layer_id][
+                    begin : end + 1
+                ].view(1, (end - begin + 1) * packed_kvcache_manager.block_size, 8, 128)
 
                 freqs_cis = global_freqs_cis[start_pos : start_pos + seqlen]
                 mask = None
@@ -331,8 +306,8 @@ class Attention(nn.Module):
                     mask = torch.triu(mask, diagonal=start_pos + 1).type_as(x)
 
                 xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-                trace_op(traces, self.component_id.with_op("xq_rotary"), xq)
-                trace_op(traces, self.component_id.with_op("xk_rotary"), xk)
+                trace_op(ctx.traces, self.component_id.with_op("xq_rotary"), xq)
+                trace_op(ctx.traces, self.component_id.with_op("xk_rotary"), xk)
 
                 cache_k[:bsz, start_pos : start_pos + seqlen] = xk
                 cache_v[:bsz, start_pos : start_pos + seqlen] = xv
@@ -359,17 +334,17 @@ class Attention(nn.Module):
                         scores + mask
                     )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
                 scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-                trace_op(traces, self.component_id.with_op("scores"), scores)
+                trace_op(ctx.traces, self.component_id.with_op("scores"), scores)
                 output = torch.matmul(
                     scores, values
                 )  # (bs, n_local_heads, seqlen, head_dim)
 
                 output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-                trace_op(traces, self.component_id.with_op("output"), output)
+                trace_op(ctx.traces, self.component_id.with_op("output"), output)
                 output_list.append(output)
             output = torch.cat([x for x in output_list])
             result = self.wo(output)
-            trace_op(traces, self.component_id.with_op("weighted_output"), result)
+            trace_op(ctx.traces, self.component_id.with_op("weighted_output"), result)
             return result  # type: ignore
 
 
@@ -546,12 +521,8 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        bsz_list: List[int],
-        start_pos_list: List[int],
         global_freqs_cis: torch.Tensor,
-        kvcache_list: list[KVCache],
-        kvcache_manager: KVCacheManager,
-        traces: Optional[dict[OpId, torch.Tensor]],
+        ctx: ForwardCtx,
     ) -> torch.Tensor:
         """
         Perform a forward pass through the TransformerBlock.
@@ -567,18 +538,16 @@ class TransformerBlock(nn.Module):
 
         """
         h = x + self.attention.forward(
-            self.attention_norm(x, traces),
-            bsz_list,
-            start_pos_list,
+            self.attention_norm(x, ctx.traces),
             global_freqs_cis,
-            kvcache_list,
-            kvcache_manager,
-            traces,
+            ctx,
         )
-        trace_op(traces, self.layer_id.with_component("attention").with_op("res"), h)
-        out = h + self.feed_forward.forward(self.ffn_norm(h, traces), traces)
         trace_op(
-            traces, self.layer_id.with_component("feed_forward").with_op("res"), out
+            ctx.traces, self.layer_id.with_component("attention").with_op("res"), h
+        )
+        out = h + self.feed_forward.forward(self.ffn_norm(h, ctx.traces), ctx.traces)
+        trace_op(
+            ctx.traces, self.layer_id.with_component("feed_forward").with_op("res"), out
         )
         return out
 

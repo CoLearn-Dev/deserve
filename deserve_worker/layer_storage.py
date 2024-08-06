@@ -6,6 +6,7 @@ from typing import Optional
 import requests
 import torch
 
+from deserve_worker.kvcache.context import ForwardCtx
 from deserve_worker.task import TaskData
 from deserve_worker.trace import ComponentId, LayerId, OpId
 
@@ -199,41 +200,19 @@ class LayerStorage:
 
     @torch.inference_mode()
     def forward(
-        self,
-        h: torch.Tensor,
-        bsz_list: list[int],
-        start_pos_list: list[int],
-        global_freqs_cis: torch.Tensor,
-        kvcache_list: list[dict[int, KVCache]],
-        kvcache_manager: KVCacheManager,
-        traces: Optional[dict[OpId, torch.Tensor]],
+        self, h: torch.Tensor, global_freqs_cis: torch.Tensor, ctx: ForwardCtx
     ) -> torch.Tensor:
-        _, seqlen = h.shape[:2]
         for full_layer_name in self.layers:
             _, layer_name = full_layer_name.split("/")
             if layer_name == "tok_embeddings":
-                h = self.layers[full_layer_name](h, traces)
-                # h = self.layers[full_layer_name](h)
+                h = self.layers[full_layer_name](h, ctx.traces)
             elif layer_name.startswith("layers."):
-                layer_id = int(layer_name.split(".")[1])
-                cur_kvcache_list = []
-                for i, kv_cache in enumerate(kvcache_list):
-                    kv_cache[layer_id].renew(1, seqlen, start_pos_list[i])
-                    cur_kvcache_list.append(kv_cache[layer_id])
-                h = self.layers[full_layer_name](
-                    h,
-                    bsz_list,
-                    start_pos_list,
-                    global_freqs_cis,
-                    cur_kvcache_list,
-                    kvcache_manager,
-                    traces,
-                )
+                h = self.layers[full_layer_name](h, global_freqs_cis, ctx)
+                ctx.layer_id += 1 # TODO: replace it with layer name
             elif layer_name == "norm":
-                h = self.layers[full_layer_name](h, traces)
+                h = self.layers[full_layer_name](h, ctx.traces)
             elif layer_name == "output":
-                h = self.layers[full_layer_name](h, traces)
-                # h = self.layers[full_layer_name](h)
+                h = self.layers[full_layer_name](h, ctx.traces)
             else:
                 raise NotImplementedError("Unknown layers")
         return h

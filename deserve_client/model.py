@@ -54,6 +54,8 @@ class CheckCtx:
 
     def check(self, op_id: OpId, x: torch.Tensor) -> torch.Tensor | Diff:
         y = self.traces[op_id].to(main_device)
+        if x.shape != y.shape:
+            raise ValueError(f"Shape mismatch: {x.shape} != {y.shape}")
         if torch.allclose(x, y, atol=self.threshold):
             return y
         else:
