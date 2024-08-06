@@ -162,7 +162,7 @@ class LLMEngine:
     ) -> PagedForwardCtx:
         max_len = 1
         for task_data in task_datas:
-            task_data.kvcache.renew(1, seqlen, task_data.start_pos)
+            task_data.kvcache.renew(task_data.start_pos + seqlen)
             kvcache = cast(PagedKVCache, task_data.kvcache)
             max_len = max(max_len, kvcache.shape()[1])
         block_table = torch.empty((bsz, max_len), dtype=torch.int32, device=main_device)
@@ -191,7 +191,7 @@ class LLMEngine:
     ) -> PackedForwardCtx:
         range_list = []
         for task_data in task_datas:
-            task_data.kvcache.renew(1, seqlen, task_data.start_pos)
+            task_data.kvcache.renew(task_data.start_pos + seqlen)
             kvcache = cast(PackedKVCache, task_data.kvcache)
             csct_block_table = kvcache.csct_block_table.flatten()
             begin = cast(int, csct_block_table[0].item())

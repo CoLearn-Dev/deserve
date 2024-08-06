@@ -12,7 +12,7 @@ torch.set_default_dtype(main_dtype)  # type: ignore
 
 class KVCache(ABC):
     @abstractmethod
-    def renew(self, bsz: int, seqlen: int, start_pos: int) -> bool:
+    def renew(self, total_len: int) -> bool:
         pass
 
     @abstractmethod
@@ -22,7 +22,7 @@ class KVCache(ABC):
 
 class KVCacheManager(ABC):
     @abstractmethod
-    def alloc(self, bsz: int, seqlen: int) -> Optional[KVCache]:
+    def alloc(self, total_len: int) -> Optional[KVCache]:
         pass
 
     @abstractmethod
@@ -30,5 +30,5 @@ class KVCacheManager(ABC):
         pass
 
     @abstractmethod
-    def renew(self, kvcache: KVCache, bsz: int, seqlen: int, start_pos: int) -> bool:
+    def renew(self, kvcache: KVCache, total_len: int) -> bool:
         pass

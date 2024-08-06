@@ -51,9 +51,7 @@ class Worker:
             None,
         )
 
-    def init_forward_task_data(
-        self, x: torch.Tensor, index: int, task_info: TaskInfo
-    ) -> TaskData:
+    def init_forward_task_data(self, x: torch.Tensor, task_info: TaskInfo) -> TaskData:
         if task_info.round == 0:
             # TODO: need double check whether request is repeated
             task_data = TaskData(
@@ -62,9 +60,7 @@ class Worker:
                 plan=task_info.plan,
                 round=0,
                 sampling_params=task_info.sampling_params,
-                kvcache=cast(
-                    KVCache, self.paged_kvcache_manager.alloc(x.shape[0], x.shape[1])
-                ),
+                kvcache=cast(KVCache, self.paged_kvcache_manager.alloc(x.shape[1])),
             )
             self.task_datas[task_info.task_id] = task_data
         else:
@@ -73,9 +69,7 @@ class Worker:
 
         return task_data
 
-    def init_trace_task_data(
-        self, x: torch.Tensor, index: int, task_info: TaskInfo
-    ) -> TaskData:
+    def init_trace_task_data(self, x: torch.Tensor, task_info: TaskInfo) -> TaskData:
         if task_info.round == 0:
             task_data = TaskData(
                 task_id=task_info.task_id,
@@ -83,9 +77,7 @@ class Worker:
                 plan=task_info.plan,
                 round=0,
                 sampling_params=task_info.sampling_params,
-                kvcache=cast(
-                    KVCache, self.packed_kvcache_manager.alloc(x.shape[0], x.shape[1])
-                ),
+                kvcache=cast(KVCache, self.packed_kvcache_manager.alloc(x.shape[1])),
             )
             self.task_datas[task_info.task_id] = task_data
         else:
@@ -106,8 +98,7 @@ class Worker:
             task_infos[0].plan[index].layers
         )
         task_datas = [
-            self.init_forward_task_data(xs, index, task_info)
-            for task_info in task_infos
+            self.init_forward_task_data(xs, task_info) for task_info in task_infos
         ]
         self.llm_engine.add_batch_forward(
             BatchForward(
@@ -138,7 +129,6 @@ class Worker:
             task_datas=[
                 self.init_forward_task_data(
                     x,
-                    index,
                     TaskInfo(
                         task_id=task_id,
                         plan=plan,
@@ -170,7 +160,6 @@ class Worker:
             layer_storage=layer_storage,
             task_data=self.init_trace_task_data(
                 x,
-                index,
                 TaskInfo(
                     task_id=task_id,
                     plan=plan,
