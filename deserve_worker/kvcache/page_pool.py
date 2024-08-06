@@ -18,7 +18,7 @@ class PagePool:
         self.block_size = block_size
         self.main_device = main_device
         self.main_dtype = main_dtype
-        self.fetch_size = 1024
+        self.fetch_size = 64
         self.mutex = threading.Lock()
 
         self.pages_k = [
