@@ -92,6 +92,7 @@ class PlanStep(BaseModel):
 
 
 def generate_plan(model: str, worker_ids: list[str]) -> list[PlanStep]:
+    worker_ids.sort()
     alias = model2alias[model]
     num_layer_total = model2layers[model]
     num_layer_worker = num_layer_total // len(worker_ids)

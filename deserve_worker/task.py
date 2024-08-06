@@ -31,7 +31,7 @@ class TaskData:
     plan: list[PlanStep]
     round: int
     sampling_params: SamplingParams
-    kvcaches: dict[int, KVCache]
+    kvcache: KVCache
     """
     When flash attention is enabled, we use paged attention, otherwise the standard attention is adopted.
     """

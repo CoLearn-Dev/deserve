@@ -1,8 +1,19 @@
 import queue
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 
+from deserve_worker.kvcache.context import ForwardCtx
+from deserve_worker.kvcache.packed_kvcache import (
+    PackedForwardCtx,
+    PackedKVCache,
+    PackedKVCacheManager,
+)
+from deserve_worker.kvcache.paged_kvcache import (
+    PagedForwardCtx,
+    PagedKVCache,
+    PagedKVCacheManager,
+)
 from deserve_worker.layer_storage import LayerStorage
 from deserve_worker.task import TaskData
 from deserve_worker.trace import OpId
@@ -141,6 +152,63 @@ class LLMEngine:
             )
             self.post_trace(h, traces, task)
 
+    def init_paged_forward_ctx(
+        self,
+        bsz: int,
+        seqlen: int,
+        task_datas: list[TaskData],
+        kvcache_manager: PagedKVCacheManager,
+        traces: Optional[dict[OpId, torch.Tensor]],
+    ) -> PagedForwardCtx:
+        max_len = 1
+        for task_data in task_datas:
+            task_data.kvcache.renew(1, seqlen, task_data.start_pos)
+            kvcache = cast(PagedKVCache, task_data.kvcache)
+            max_len = max(max_len, kvcache.shape()[1])
+        block_table = torch.empty((bsz, max_len), dtype=torch.int32, device=main_device)
+        for i, task_data in enumerate(task_datas):
+            kvcache = cast(PagedKVCache, task_data.kvcache)
+            block_table[i, : kvcache.shape()[1]] = kvcache.block_table
+        return PagedForwardCtx(
+            layer_id=0,
+            start_pos_list=torch.tensor(
+                [task.start_pos for task in task_datas],
+                device=main_device,
+                dtype=torch.int32,
+            ),
+            block_table=block_table,
+            kvcache_manager=kvcache_manager,
+            traces=traces,
+        )
+
+    def init_packed_forward_ctx(
+        self,
+        bsz: int,
+        seqlen: int,
+        task_datas: list[TaskData],
+        kvcache_manager: PackedKVCacheManager,
+        traces: Optional[dict[OpId, torch.Tensor]],
+    ) -> PackedForwardCtx:
+        range_list = []
+        for task_data in task_datas:
+            task_data.kvcache.renew(1, seqlen, task_data.start_pos)
+            kvcache = cast(PackedKVCache, task_data.kvcache)
+            csct_block_table = kvcache.csct_block_table.flatten()
+            begin = cast(int, csct_block_table[0].item())
+            end = cast(int, csct_block_table[-1].item())
+            range_list.append((begin, end))
+        return PackedForwardCtx(
+            layer_id=0,
+            start_pos_list=torch.tensor(
+                [task.start_pos for task in task_datas],
+                device=main_device,
+                dtype=torch.int32,
+            ),
+            range_list=range_list,
+            kvcache_manager=kvcache_manager,
+            traces=traces,
+        )
+
     def step_forward(
         self,
         h: torch.Tensor,
@@ -152,18 +220,25 @@ class LLMEngine:
     ) -> torch.Tensor:
         # we need to check that all tasks share the same layer storage
         with torch.inference_mode():
-            bsz_list = [1 for _ in range(len(task_datas))]
-            start_pos_list = [task.start_pos for task in task_datas]
-            kvcache_list = [task.kvcaches for task in task_datas]
-            result = layer_storage.forward(
-                h,
-                bsz_list,
-                start_pos_list,
-                global_freqs_cis,
-                kvcache_list,
-                kvcache_manager,
-                traces,
-            )
+            bsz, seqlen = h.shape[:2]
+            if isinstance(kvcache_manager, PagedKVCacheManager):
+                ctx = cast(
+                    ForwardCtx,
+                    self.init_paged_forward_ctx(
+                        bsz, seqlen, task_datas, kvcache_manager, traces
+                    ),
+                )
+            elif isinstance(kvcache_manager, PackedKVCacheManager):
+                ctx = cast(
+                    ForwardCtx,
+                    self.init_packed_forward_ctx(
+                        bsz, seqlen, task_datas, kvcache_manager, traces
+                    ),
+                )
+            else:
+                raise NotImplementedError("Unknown KVCacheManager")
+
+            result = layer_storage.forward(h, global_freqs_cis, ctx)
             return result
 
     def post_forward(self, merged_h: torch.Tensor, tasks: BatchForward) -> None:
