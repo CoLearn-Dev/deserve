@@ -270,7 +270,7 @@ class Attention(nn.Module):
             return self.wo(output)  # type: ignore
         else:
             ctx = cast(PackedForwardCtx, ctx)
-            packed_kvcache_manager = cast(PackedKVCacheManager, ctx.kvcache_manager)
+            packed_kvcache_manager = ctx.kvcache_manager
             start = 0
             output_list = []
             for i, start_pos in enumerate(ctx.start_pos_list):

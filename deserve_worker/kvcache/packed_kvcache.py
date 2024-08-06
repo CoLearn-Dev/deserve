@@ -24,7 +24,7 @@ class PackedKVCacheManager(KVCacheManager):
             cur += self.block_size
         return cur
 
-    def alloc(self, total_len) -> Optional[KVCache]:
+    def alloc(self, total_len: int) -> Optional[KVCache]:
         len_block = (total_len + self.block_size - 1) // self.page_pool.block_size
         blocks = self.page_pool.alloc(len_block)
         # the consecutive block table is in shape of [bsz, len_block], which corresponds to [bsz, len_block * block_size, 8, 128] in memory
@@ -40,7 +40,7 @@ class PackedKVCacheManager(KVCacheManager):
             (0, 0), device=main_device, dtype=torch.int32
         )
 
-    def renew(self, kvcache: KVCache, total_len) -> bool:
+    def renew(self, kvcache: KVCache, total_len: int) -> bool:
         kvcache = cast(PackedKVCache, kvcache)
         if total_len > kvcache.csct_block_table.shape[1] * self.page_pool.block_size:
             len_block = (total_len + self.block_size - 1) // self.page_pool.block_size
