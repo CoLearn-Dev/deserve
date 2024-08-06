@@ -1,5 +1,5 @@
 import threading
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 
@@ -60,8 +60,8 @@ class PagePool:
         if avail_indices.shape[0] == 0:
             return None
         else:
-            index = avail_indices[0]
-            return (invert_indices == index).nonzero().flatten()
+            index: torch.Tensor = avail_indices[0]
+            return (invert_indices == index).nonzero().flatten()  # type: ignore
 
     def recycle(self, blocks: torch.Tensor) -> None:
         self.page_bitmap[blocks] = True

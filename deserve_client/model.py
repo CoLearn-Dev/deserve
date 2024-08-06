@@ -11,7 +11,7 @@ from transformers import AutoTokenizer  # type: ignore
 from deserve_worker.trace import ComponentId, LayerId, OpId
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-torch.set_default_dtype(torch.float16)
+torch.set_default_dtype(torch.float16)  # type: ignore
 main_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -83,7 +83,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    def _norm(self, x: torch.Tensor):
+    def _norm(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def verify(self, x: torch.Tensor, ctx: VerifyCtx) -> bool:
@@ -105,7 +105,7 @@ class RMSNorm(nn.Module):
         )
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
     freqs = torch.outer(t, freqs)
@@ -113,7 +113,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     return freqs_cis
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     ndim = x.ndim
     assert 0 <= 1 < ndim
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
@@ -156,25 +156,25 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
-        self.wq = torch.nn.utils.skip_init(
+        self.wq = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
         )
-        self.wk = torch.nn.utils.skip_init(
+        self.wk = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             args.dim,
             self.n_kv_heads * self.head_dim,
             bias=False,
         )
-        self.wv = torch.nn.utils.skip_init(
+        self.wv = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             args.dim,
             self.n_kv_heads * self.head_dim,
             bias=False,
         )
-        self.wo = torch.nn.utils.skip_init(
+        self.wo = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             args.n_heads * self.head_dim,
             args.dim,
@@ -335,19 +335,19 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = torch.nn.utils.skip_init(
+        self.w1 = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             dim,
             hidden_dim,
             bias=False,
         )
-        self.w2 = torch.nn.utils.skip_init(
+        self.w2 = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             hidden_dim,
             dim,
             bias=False,
         )
-        self.w3 = torch.nn.utils.skip_init(
+        self.w3 = torch.nn.utils.skip_init(  # type: ignore
             nn.Linear,
             dim,
             hidden_dim,
@@ -544,7 +544,7 @@ class Transformer(nn.Module):
         cache_dir = "~/.cache/fleece-worker/models/llama-3-8b-instruct-slice/"
         cache_dir = os.path.expanduser(cache_dir)
 
-        self.tok_embeddings = torch.nn.utils.skip_init(
+        self.tok_embeddings = torch.nn.utils.skip_init(  # type: ignore
             TraceEmbedding,
             ComponentId("tok_embeddings", "main"),
             params.vocab_size,
@@ -569,7 +569,7 @@ class Transformer(nn.Module):
         )
         self.norm.load_state_dict(torch.load(cache_dir + "norm.pt", map_location="cpu"))
         self.norm.to(main_device)
-        self.output = torch.nn.utils.skip_init(
+        self.output = torch.nn.utils.skip_init(  # type: ignore
             TraceLinear, ComponentId("output", "main"), params.dim, params.vocab_size
         )
         self.output.load_state_dict(
@@ -607,16 +607,16 @@ class Transformer(nn.Module):
                     OpId(f"{layer_int - 1:02}", "feed_forward", "res")
                 )
 
-            return self.layers[layer_int].verify(input, self.freqs_cis, mask, ctx)
+            return self.layers[layer_int].verify(input, self.freqs_cis, mask, ctx)  # type: ignore
         elif layer == "tok_embeddings":
-            return self.tok_embeddings.verify(tokens, ctx)
+            return self.tok_embeddings.verify(tokens, ctx)  # type: ignore
         elif layer == "norm":
             num_layers = self.n_layers
             return self.norm.verify(
                 ctx.get_trace(OpId(f"{num_layers - 1:02}", "feed_forward", "res")), ctx
             )
         elif layer == "output":
-            return self.output.verify(
+            return self.output.verify(  # type: ignore
                 ctx.get_trace(OpId("norm", "main", "output")), ctx
             )
         assert False
@@ -657,4 +657,4 @@ class Transformer(nn.Module):
         output = self.output.forward(h, ctx)
         if isinstance(output, Diff):
             return output
-        return output.float()
+        return output.float()# type: ignore

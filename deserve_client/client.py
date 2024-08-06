@@ -33,7 +33,9 @@ def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
 
 
 @cli.command()
-def complete(model: str, prompt: str, entry_point: str = "http://localhost:19000"):
+def complete(
+    model: str, prompt: str, entry_point: str = "http://localhost:19000"
+) -> None:
     response = requests.post(
         f"{entry_point}/complete",
         json={"model": model, "prompt": prompt},
@@ -49,7 +51,7 @@ def complete(model: str, prompt: str, entry_point: str = "http://localhost:19000
 
 
 @cli.command()
-def trace(model: str, prompt: str, entry_point: str = "http://localhost:19000"):
+def trace(model: str, prompt: str, entry_point: str = "http://localhost:19000") -> None:
     response = requests.post(
         f"{entry_point}/trace",
         json={"model": model, "prompt": prompt},
@@ -68,7 +70,9 @@ def trace(model: str, prompt: str, entry_point: str = "http://localhost:19000"):
 
 
 @cli.command()
-def verify(model: str, prompt: str, entry_point: str = "http://localhost:19000"):
+def verify(
+    model: str, prompt: str, entry_point: str = "http://localhost:19000"
+) -> None:
     response = requests.post(
         f"{entry_point}/trace",
         json={"model": model, "prompt": prompt},

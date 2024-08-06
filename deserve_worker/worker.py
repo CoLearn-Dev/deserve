@@ -8,7 +8,7 @@ import requests
 import torch
 from transformers import AutoTokenizer  # type: ignore
 
-from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager  # type: ignore
+from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager
 from deserve_worker.kvcache.page_pool import PagePool
 
 from .command import BatchForward, BatchResult, BatchUpdate, SingleTrace, TraceResult
@@ -281,7 +281,7 @@ class Worker:
                 },
             )
 
-    def heartbeat(self):
+    def heartbeat(self) -> None:
         while True:
             self.network_executor.submit(
                 requests.post,
