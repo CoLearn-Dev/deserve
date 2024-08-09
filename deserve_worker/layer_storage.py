@@ -1,23 +1,19 @@
 import os
 import threading
+import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Optional
 
 import requests
 import torch
 
-from deserve_worker.kvcache.context import ForwardCtx
+from deserve_worker.model.args import ModelArgs
+from deserve_worker.model.context.forward import ForwardCtx
+from deserve_worker.model.layer.linear import TraceEmbedding, TraceLinear
+from deserve_worker.model.layer.norm import RMSNorm
+from deserve_worker.model.llama import TransformerBlock
 from deserve_worker.task import TaskData
 from deserve_worker.trace import ComponentId, LayerId, OpId
-
-from .kvcache.kvcache import KVCache, KVCacheManager
-from .model.llama import (
-    ModelArgs,
-    RMSNorm,
-    TraceEmbedding,
-    TraceLinear,
-    TransformerBlock,
-)
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 STOP_TOKEN_IDS = [128001, 128009]
@@ -157,34 +153,35 @@ class LayerManager:
                 model_args = ModelArgs(**llama_3_70b_args)  # type: ignore
             else:
                 raise NotImplementedError("Unknown model")
+            l: torch.nn.Module
             if layer_name == "tok_embeddings":
-                l = torch.nn.utils.skip_init(  # type: ignore
-                    # torch.nn.Embedding,
+                l = torch.nn.utils.skip_init(
                     TraceEmbedding,
                     ComponentId("tok_embeddings", "main"),
                     model_args.vocab_size,
                     model_args.dim,
-                )
+                )  # type: ignore
             elif layer_name.startswith("layer"):
                 l = TransformerBlock(LayerId(f"{int(layer_name[7:]):02}"), model_args)
             elif layer_name == "norm":
                 l = RMSNorm(
-                    ComponentId("norm", "main"), model_args.dim, eps=model_args.norm_eps
+                    ComponentId("norm", "main"),
+                    model_args.dim,
+                    eps=model_args.norm_eps,
                 )
             elif layer_name == "output":
-                l = torch.nn.utils.skip_init(  # type: ignore
-                    # torch.nn.Linear,
+                l = torch.nn.utils.skip_init(
                     TraceLinear,
                     ComponentId("output", "main"),
                     model_args.dim,
                     model_args.vocab_size,
-                )
+                )  # type: ignore
             else:
                 raise NotImplementedError("Unknown layers")
             l.load_state_dict(torch.load(path, map_location="cpu"))
             l.to(self.main_device)
-            print("Loaded", full_layer_name)
             self.layers[full_layer_name] = l
+            print("Loaded", full_layer_name)
         for full_layer_name in full_layer_names:
             result[full_layer_name] = self.layers[full_layer_name]
         return result
@@ -199,20 +196,18 @@ class LayerStorage:
         self.layers.clear()
 
     @torch.inference_mode()
-    def forward(
-        self, h: torch.Tensor, global_freqs_cis: torch.Tensor, ctx: ForwardCtx
-    ) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, ctx: ForwardCtx) -> torch.Tensor:
         for full_layer_name in self.layers:
             _, layer_name = full_layer_name.split("/")
             if layer_name == "tok_embeddings":
-                h = self.layers[full_layer_name](h, ctx.traces)
+                h = self.layers[full_layer_name](h, ctx)
             elif layer_name.startswith("layers."):
-                h = self.layers[full_layer_name](h, global_freqs_cis, ctx)
-                ctx.layer_id += 1 # TODO: replace it with layer name
+                h = self.layers[full_layer_name](h, ctx)
+                ctx.layer_id += 1
             elif layer_name == "norm":
-                h = self.layers[full_layer_name](h, ctx.traces)
+                h = self.layers[full_layer_name](h, ctx)
             elif layer_name == "output":
-                h = self.layers[full_layer_name](h, ctx.traces)
+                h = self.layers[full_layer_name](h, ctx)
             else:
                 raise NotImplementedError("Unknown layers")
         return h
@@ -226,25 +221,25 @@ class LayerStorage:
         all_tokens = []
         all_ids = []
         done_ids = []
-        for ptr, task_data in enumerate(task_datas):
-            h = merged_h[ptr : ptr + 1]
-            _, seqlen = h.shape[:2]
+        ptr = 0
+        for task_data in task_datas:
+            seqlen = task_data.seqlen
+            h = merged_h[ptr : ptr + seqlen]
+            ptr += seqlen
             task_data.start_pos += seqlen
             task_data.round += 1
             sampling_params = task_data.sampling_params
             if task_data.start_pos >= sampling_params.max_total_len:
-                next_token = torch.tensor([[EOS_TOKEN_ID]])
+                next_token = torch.tensor([EOS_TOKEN_ID])
             elif sampling_params.temperature > 0:
-                probs = torch.softmax(h[:, -1] / sampling_params.temperature, dim=-1)
-                next_token = sample_top_p(probs, sampling_params.top_p)
-                next_token = next_token.reshape(1, -1)
+                probs = torch.softmax(h[-1] / sampling_params.temperature, dim=-1)
+                next_token = sample_top_p(probs, sampling_params.top_p).reshape(1)
             else:
-                next_token = torch.argmax(h[:, -1], dim=-1)
-                next_token = next_token.reshape(1, -1)
+                next_token = torch.argmax(h[-1], dim=-1).reshape(1)
             next_token = next_token.to("cpu")
             all_ids.append(task_data.task_id)
             all_tokens.append(next_token)
-            if next_token[0][0] in STOP_TOKEN_IDS:
+            if next_token[0] in STOP_TOKEN_IDS:
                 done_ids.append(task_data.task_id)
             else:
                 ongoing_ids.append(task_data.task_id)

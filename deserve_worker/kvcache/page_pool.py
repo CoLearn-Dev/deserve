@@ -13,6 +13,7 @@ class PagePool:
         main_device: torch.device,
         main_dtype: torch.dtype,
     ):
+        # self.num_layers = num_layers
         self.num_layers = num_layers
         self.num_blocks = num_blocks
         self.block_size = block_size
@@ -23,13 +24,17 @@ class PagePool:
 
         self.pages_k = [
             torch.empty(
-                (num_blocks, block_size, 8, 128), device=main_device, dtype=main_dtype
+                (num_blocks, block_size, 8, 128),
+                device=main_device,
+                dtype=main_dtype,
             )
             for _ in range(num_layers)
         ]
         self.pages_v = [
             torch.empty(
-                (num_blocks, block_size, 8, 128), device=main_device, dtype=main_dtype
+                (num_blocks, block_size, 8, 128),
+                device=main_device,
+                dtype=main_dtype,
             )
             for _ in range(num_layers)
         ]
@@ -42,7 +47,9 @@ class PagePool:
         with self.mutex:
             if size > self.page_buffer.shape[0]:
                 fetch_size = max(self.fetch_size, size - self.page_buffer.shape[0])
-                block_avails = torch.nonzero(self.page_bitmap)[:fetch_size]
+                block_avails = torch.nonzero(self.page_bitmap)[:fetch_size].to(
+                    torch.int32
+                )
                 self.page_bitmap[block_avails] = False
                 self.page_buffer = torch.cat([self.page_buffer, block_avails])
             if size > self.page_buffer.shape[0]:
@@ -65,3 +72,9 @@ class PagePool:
 
     def recycle(self, blocks: torch.Tensor) -> None:
         self.page_bitmap[blocks] = True
+
+    def get_pages_k(self, layer: int) -> torch.Tensor:
+        return self.pages_k[layer]
+
+    def get_pages_v(self, layer: int) -> torch.Tensor:
+        return self.pages_v[layer]

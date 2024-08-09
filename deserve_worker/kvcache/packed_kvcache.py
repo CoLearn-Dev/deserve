@@ -3,7 +3,6 @@ from typing import Optional, cast
 
 import torch
 
-from deserve_worker.kvcache.context import ForwardCtx
 from deserve_worker.kvcache.kvcache import KVCache, KVCacheManager, main_device
 from deserve_worker.kvcache.page_pool import PagePool
 
@@ -95,9 +94,3 @@ class PackedKVCache(KVCache):
 
     def clear(self) -> None:
         return self.manager.recycle(self)
-
-
-@dataclass
-class PackedForwardCtx(ForwardCtx):
-    range_list: list[tuple[int, int]]
-    kvcache_manager: PackedKVCacheManager

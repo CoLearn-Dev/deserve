@@ -21,6 +21,7 @@ class TaskInfo(BaseModel):
     task_id: str
     plan: list[PlanStep]
     round: int
+    seqlen: int
     sampling_params: SamplingParams
 
 
@@ -30,6 +31,7 @@ class TaskData:
     start_pos: int
     plan: list[PlanStep]
     round: int
+    seqlen: int
     sampling_params: SamplingParams
     kvcache: KVCache
     """

@@ -1,6 +1,7 @@
 import queue
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, cast
 
@@ -8,15 +9,21 @@ import requests
 import torch
 from transformers import AutoTokenizer  # type: ignore
 
+from deserve_worker.execution.response import (
+    BatchResult,
+    BatchUpdate,
+    LLMResponse,
+    TraceResult,
+)
 from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager
 from deserve_worker.kvcache.page_pool import PagePool
 
-from .command import BatchForward, BatchResult, BatchUpdate, SingleTrace, TraceResult
+from .execution.exec import BatchDecode, BatchPrefill, SingleTrace
 from .kvcache.kvcache import KVCache, main_device, main_dtype
 from .kvcache.paged_kvcache import PagedKVCacheManager
 from .layer_storage import LayerManager
 from .llm_engine import LLMEngine
-from .model.llama import dumps
+from .model.utils import dumps
 from .task import PlanStep, SamplingParams, TaskData, TaskInfo
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
@@ -26,19 +33,23 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
 class Worker:
     def __init__(
-        self, worker_id: str, worker_url: str, max_total_bsz: int, controller_url: str
+        self,
+        worker_id: str,
+        worker_url: str,
+        max_total_bsz: int,
+        controller_url: str,
     ):
         self.worker_id = worker_id
         self.worker_url = worker_url
         self.controller_url = controller_url
         self.task_datas: dict[str, TaskData] = {}
-        self.relay_queue = queue.Queue[BatchResult | BatchUpdate | TraceResult]()
-        self.llm_engine = LLMEngine(max_total_bsz, self.relay_queue)
+        self.relay_queue = queue.Queue[LLMResponse]()
+        self.llm_engine = LLMEngine(max_total_bsz, 256, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
-        self.block_pool = PagePool(40, 290, 256, main_device, main_dtype)
+        self.page_pool = PagePool(40, 290, 256, main_device, main_dtype)
         # TODO: in future, different cache manager could allocate on same memory
-        self.paged_kvcache_manager = PagedKVCacheManager(self.block_pool)
-        self.packed_kvcache_manager = PackedKVCacheManager(self.block_pool)
+        self.paged_kvcache_manager = PagedKVCacheManager(self.page_pool)
+        self.packed_kvcache_manager = PackedKVCacheManager(self.page_pool)
         self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
 
         threading.Thread(target=self.llm_engine.run, daemon=True).start()
@@ -59,13 +70,17 @@ class Worker:
                 start_pos=0,
                 plan=task_info.plan,
                 round=0,
+                seqlen=task_info.seqlen,
                 sampling_params=task_info.sampling_params,
-                kvcache=cast(KVCache, self.paged_kvcache_manager.alloc(x.shape[1])),
+                kvcache=cast(
+                    KVCache, self.paged_kvcache_manager.alloc(task_info.seqlen)
+                ),
             )
             self.task_datas[task_info.task_id] = task_data
         else:
             task_data = self.task_datas[task_info.task_id]
             task_data.round = task_info.round
+            task_data.seqlen = task_info.seqlen
 
         return task_data
 
@@ -76,21 +91,26 @@ class Worker:
                 start_pos=0,
                 plan=task_info.plan,
                 round=0,
+                seqlen=task_info.seqlen,
                 sampling_params=task_info.sampling_params,
-                kvcache=cast(KVCache, self.packed_kvcache_manager.alloc(x.shape[1])),
+                kvcache=cast(
+                    KVCache, self.packed_kvcache_manager.alloc(task_info.seqlen)
+                ),
             )
             self.task_datas[task_info.task_id] = task_data
         else:
             task_data = self.task_datas[task_info.task_id]
             task_data.round = task_info.round
+            task_data.seqlen = task_info.seqlen
 
         return task_data
 
     def batch_forward(
         self,
-        xs: torch.Tensor,
+        xs: torch.Tensor,  # in shape [bsz * seqlen, vocab_size]
         task_infos: list[TaskInfo],
     ) -> None:
+        round = task_infos[0].round
         plan = task_infos[0].plan
         index = self.locate_in_plan(plan)
         assert index is not None
@@ -100,19 +120,34 @@ class Worker:
         task_datas = [
             self.init_forward_task_data(xs, task_info) for task_info in task_infos
         ]
-        self.llm_engine.add_batch_forward(
-            BatchForward(
+        seqlens = [task_info.seqlen for task_info in task_infos]
+        assert sum(seqlens) == xs.shape[0]
+        if round == 0:
+            prefill = BatchPrefill(
                 xs=xs.to(main_device),
                 layer_storage=layer_storage,
+                page_pool=self.page_pool,
                 task_datas=task_datas,
+                bsz=len(task_infos),
                 need_sample=(index == len(plan) - 1),
-                kvcache_manager=self.paged_kvcache_manager,
+                seqlens=seqlens,
+                total_seqlen=sum(seqlens),
             )
-        )
+            self.llm_engine.add_request(prefill)
+        else:
+            decode = BatchDecode(
+                xs=xs.to(main_device),
+                layer_storage=layer_storage,
+                page_pool=self.page_pool,
+                task_datas=task_datas,
+                bsz=len(task_infos),
+                need_sample=(index == len(plan) - 1),
+            )
+            self.llm_engine.add_request(decode)
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: torch.Tensor,  # in shape [seqlen, vocab_size]
         task_id: str,
         round: int,
         plan: list[PlanStep],
@@ -123,24 +158,41 @@ class Worker:
             return None
 
         layer_storage = self.layer_manager.get_layer_storage(plan[index].layers)
-        forward = BatchForward(
-            xs=x.to(main_device),
-            layer_storage=layer_storage,
-            task_datas=[
-                self.init_forward_task_data(
-                    x,
-                    TaskInfo(
-                        task_id=task_id,
-                        plan=plan,
-                        round=round,
-                        sampling_params=sampling_params,
-                    ),
-                )
-            ],
-            need_sample=(index == len(plan) - 1),
-            kvcache_manager=self.paged_kvcache_manager,
-        )
-        self.llm_engine.add_batch_forward(forward)
+        seqlen = x.shape[0]
+        task_datas = [
+            self.init_forward_task_data(
+                x,
+                TaskInfo(
+                    task_id=task_id,
+                    plan=plan,
+                    round=round,
+                    seqlen=seqlen,
+                    sampling_params=sampling_params,
+                ),
+            )
+        ]
+        if round == 0:
+            prefill = BatchPrefill(
+                xs=x.to(main_device),
+                layer_storage=layer_storage,
+                page_pool=self.page_pool,
+                task_datas=task_datas,
+                bsz=1,
+                need_sample=(index == len(plan) - 1),
+                seqlens=[seqlen],
+                total_seqlen=seqlen,
+            )
+            self.llm_engine.add_request(prefill)
+        else:
+            decode = BatchDecode(
+                xs=x.to(main_device),
+                layer_storage=layer_storage,
+                page_pool=self.page_pool,
+                task_datas=task_datas,
+                bsz=1,
+                need_sample=(index == len(plan) - 1),
+            )
+            self.llm_engine.add_request(decode)
 
     def trace(
         self,
@@ -154,23 +206,30 @@ class Worker:
         if index is None:
             return None
 
+        print(x.shape)
+        seqlen = x.shape[0]
         layer_storage = self.layer_manager.get_layer_storage(plan[index].layers)
         trace = SingleTrace(
-            x=x.to(main_device),
+            xs=x.to(main_device),
             layer_storage=layer_storage,
-            task_data=self.init_trace_task_data(
-                x,
-                TaskInfo(
-                    task_id=task_id,
-                    plan=plan,
-                    round=round,
-                    sampling_params=sampling_params,
-                ),
-            ),
-            kvcache_manager=self.packed_kvcache_manager,
+            task_datas=[
+                self.init_trace_task_data(
+                    x,
+                    TaskInfo(
+                        task_id=task_id,
+                        plan=plan,
+                        round=round,
+                        seqlen=seqlen,
+                        sampling_params=sampling_params,
+                    ),
+                )
+            ],
+            bsz=1,
+            page_pool=self.page_pool,
             need_sample=(index == len(plan) - 1),
+            traces={},
         )
-        self.llm_engine.add_trace(trace)
+        self.llm_engine.add_request(trace)
 
     def relay(self) -> None:
         q = self.relay_queue
@@ -192,6 +251,11 @@ class Worker:
                                 "task_id": task_id,
                                 "round": self.task_datas[task_id].round,
                                 "plan": plan,
+                                "seqlen": (
+                                    1
+                                    if self.task_datas[task_id].round != 0
+                                    else self.task_datas[task_id].seqlen
+                                ),
                                 "sampling_params": self.task_datas[
                                     task_id
                                 ].sampling_params,
