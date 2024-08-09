@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
-from .model.llama import loads
+from .model.utils import loads
 from .task import PlanStep, SamplingParams, TaskInfo
 from .worker import Worker
 
@@ -86,6 +86,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     worker = Worker(
-        args.id, f"http://localhost:{args.port}", args.batch_size, args.controller_url
+        args.id,
+        f"http://localhost:{args.port}",
+        args.batch_size,
+        args.controller_url,
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port)

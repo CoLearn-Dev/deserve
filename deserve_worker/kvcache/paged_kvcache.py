@@ -2,8 +2,11 @@ from dataclasses import dataclass
 from typing import Optional, cast
 
 import torch
+from flashinfer import (  # type: ignore
+    BatchDecodeWithPagedKVCacheWrapper,
+    BatchPrefillWithPagedKVCacheWrapper,
+)
 
-from deserve_worker.kvcache.context import ForwardCtx
 from deserve_worker.kvcache.page_pool import PagePool
 
 from .kvcache import KVCache, KVCacheManager, main_device
@@ -72,9 +75,3 @@ class PagedKVCache(KVCache):
 
     def shape(self) -> torch.Size:
         return self.block_table.shape
-
-
-@dataclass
-class PagedForwardCtx(ForwardCtx):
-    block_table: torch.Tensor
-    kvcache_manager: KVCacheManager

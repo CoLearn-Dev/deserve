@@ -149,7 +149,7 @@ def complete(request: OnlineCompleteRequest) -> StreamingResponse:
     token_channels[task_id] = token_channel
 
     # generate request
-    tokens = tokenizer(prompt, return_tensors="pt")["input_ids"]
+    tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
     plan = generate_plan(model, list(workers.keys()))
     tensors = {"x": tokens}
     metadata = {
@@ -215,7 +215,8 @@ def trace(request: TraceRequest) -> Response:
     trace_channels[task_id] = trace_channel
 
     # generate request
-    tokens = tokenizer(prompt, return_tensors="pt")["input_ids"]
+    tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
+    print(tokens.shape)
     online_workers = list(workers.keys())
     plan = generate_plan(model, online_workers)
     tensors = {"x": tokens}
@@ -234,15 +235,14 @@ def trace(request: TraceRequest) -> Response:
 
 class UpdateTaskRequest(BaseModel):
     task_id: str
-    output_tokens: list[list[int]]  # [bsz, seqlen], in normal case, bsz=1 and seqlen=1
+    output_tokens: list[int]  # [bsz, seqlen], in normal case, bsz=1 and seqlen=1
 
 
 @app.post("/update_tasks")
 def update_tasks(requests: list[UpdateTaskRequest]) -> None:
     for request in requests:
         task_id = request.task_id
-        for token_ids in request.output_tokens:
-            token_id = token_ids[0]
+        for token_id in request.output_tokens:
             if token_id in STOP_TOKEN_IDS:
                 token_channels[task_id].put(None)
             else:
