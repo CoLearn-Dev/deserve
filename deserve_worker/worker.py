@@ -129,7 +129,6 @@ class Worker:
                 page_pool=self.page_pool,
                 task_datas=task_datas,
                 bsz=len(task_infos),
-                need_sample=(index == len(plan) - 1),
                 seqlens=seqlens,
                 total_seqlen=sum(seqlens),
             )
@@ -141,7 +140,6 @@ class Worker:
                 page_pool=self.page_pool,
                 task_datas=task_datas,
                 bsz=len(task_infos),
-                need_sample=(index == len(plan) - 1),
             )
             self.llm_engine.add_request(decode)
 
@@ -178,7 +176,6 @@ class Worker:
                 page_pool=self.page_pool,
                 task_datas=task_datas,
                 bsz=1,
-                need_sample=(index == len(plan) - 1),
                 seqlens=[seqlen],
                 total_seqlen=seqlen,
             )
@@ -190,7 +187,6 @@ class Worker:
                 page_pool=self.page_pool,
                 task_datas=task_datas,
                 bsz=1,
-                need_sample=(index == len(plan) - 1),
             )
             self.llm_engine.add_request(decode)
 
@@ -225,7 +221,6 @@ class Worker:
             ],
             bsz=1,
             page_pool=self.page_pool,
-            need_sample=(index == len(plan) - 1),
             traces={},
         )
         self.llm_engine.add_request(trace)
