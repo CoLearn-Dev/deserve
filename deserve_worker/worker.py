@@ -3,7 +3,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import requests
 import torch
@@ -206,7 +206,6 @@ class Worker:
         if index is None:
             return None
 
-        print(x.shape)
         seqlen = x.shape[0]
         layer_storage = self.layer_manager.get_layer_storage(plan[index].layers)
         trace = SingleTrace(
@@ -308,11 +307,12 @@ class Worker:
                         f"{next_worker_url}/trace",
                         data=data,
                     )
+                metadata: dict[str, Any] = {"task_id": task_id}
+                if next_index == 0:  # last worker
+                    metadata["token"] = result.x.tolist()
                 data = dumps(
                     {str(key): value for key, value in result.trace.items()},
-                    {
-                        "task_id": task_id,
-                    },
+                    metadata,
                 )
                 self.network_executor.submit(
                     requests.post,
