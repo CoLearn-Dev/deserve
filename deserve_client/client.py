@@ -1,5 +1,6 @@
 import pickle
-from typing import Any
+import traceback
+from typing import Any, Optional
 
 import requests
 import safetensors.torch
@@ -62,10 +63,14 @@ def trace(model: str, prompt: str, entry_point: str = "http://localhost:19000") 
         return
 
     tensors = {}
+    next_token = None
     for chunk in response.iter_content(chunk_size=None):
         if chunk:
-            temp_tensors, _ = loads(chunk)
+            temp_tensors, metadata = loads(chunk)
+            if "token" in metadata:
+                next_token = metadata["token"]
             tensors.update(temp_tensors)
+    print(next_token)
     print(list(tensors.keys()))
 
 
@@ -98,6 +103,53 @@ def verify(
             print("Difference found for", result.op_id)
         else:
             print("Difference found but verification failed")
+
+
+@cli.command()
+def test_range(
+    model: str, prompt: str, len: int, entry_point: str = "http://localhost:19000"
+) -> None:
+    max_tensors: dict[str, float] = {}
+    min_tensors: dict[str, float] = {}
+    for _ in range(len):
+        response = requests.post(
+            f"{entry_point}/trace",
+            json={"model": model, "prompt": prompt},
+            stream=True,
+        )
+        if response.status_code != 200:
+            typer.echo("Error")
+            return
+
+        tensors = {}
+        next_token: Optional[str] = None
+        for chunk in response.iter_content(chunk_size=None):
+            if chunk:
+                temp_tensors, metadata = loads(chunk)
+                if "token" in metadata:
+                    next_token = metadata["token"]
+                tensors.update(temp_tensors)
+        for k, v in tensors.items():
+            max_f = v.flatten().abs().max().item()
+            min_f = v.flatten().abs().min().item()
+            if k not in max_tensors:
+                max_tensors[k] = max_f
+            else:
+                max_tensors[k] = max(max_tensors[k], max_f)
+            if k not in min_tensors:
+                min_tensors[k] = min_f
+            else:
+                min_tensors[k] = min(min_tensors[k], min_f)
+        if next_token is not None:
+            prompt += next_token
+        else:
+            print("No more tokens")
+            break
+
+    print("Prompt:", prompt)
+    for k, maximum in max_tensors.items():
+        minimum = min_tensors[k]
+        print(f"{k}: {maximum} {minimum}")
 
 
 if __name__ == "__main__":

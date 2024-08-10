@@ -28,7 +28,9 @@ model2alias = {
     "meta-llama/Meta-Llama-3-8B-Instruct": "llama-3-8b-instruct-slice",
 }
 token_channels: dict[str, queue.Queue[Optional[str]]] = {}
-trace_channels: dict[str, queue.Queue[dict[str, torch.Tensor]]] = {}
+trace_channels: dict[
+    str, queue.Queue[Optional[tuple[dict[str, torch.Tensor], dict[str, str]]]]
+] = {}
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
 STOP_TOKEN_IDS = [128001, 128009]
@@ -179,7 +181,8 @@ def offline_complete(request: OfflineCompleteRequest) -> None:
 
 
 def relay_traces(
-    channel: queue.Queue[dict[str, torch.Tensor]], total: int
+    channel: queue.Queue[Optional[tuple[dict[str, torch.Tensor], dict[str, str]]]],
+    total: int,
 ) -> Generator[bytes, None, None]:
     cnt = 0
     while cnt < total:
@@ -187,7 +190,8 @@ def relay_traces(
         cnt += 1
         if value is None:
             break
-        bytes = dumps(value, {})
+        tensors, metadata = value
+        bytes = dumps(tensors, metadata)
         yield bytes
 
 
@@ -211,12 +215,13 @@ def trace(request: TraceRequest) -> Response:
     token_channels[task_id] = token_channel
 
     # init traces
-    trace_channel = queue.Queue[dict[str, torch.Tensor]]()
+    trace_channel = queue.Queue[
+        Optional[tuple[dict[str, torch.Tensor], dict[str, str]]]
+    ]()
     trace_channels[task_id] = trace_channel
 
     # generate request
     tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-    print(tokens.shape)
     online_workers = list(workers.keys())
     plan = generate_plan(model, online_workers)
     tensors = {"x": tokens}
@@ -259,7 +264,12 @@ async def update_traces(requests: Request) -> None:
     tensors, metadata = loads(body)
     task_id = metadata["task_id"]
     if task_id in trace_channels:
-        trace_channels[task_id].put(tensors)
+        if "token" in metadata:
+            trace_channels[task_id].put(
+                (tensors, {"token": tokenizer.decode(metadata["token"])})
+            )
+        else:
+            trace_channels[task_id].put((tensors, {}))
     else:
         logger.warning(f"Task {task_id} not found")
 
