@@ -81,7 +81,6 @@ class LLMEngine:
                 total_bsz += prefills[i].bsz
                 total_seqlen += prefills[i].total_seqlen
                 todos.append(prefills.pop(i))
-        print("total", total_seqlen)
         todo = BatchPrefill.merge(todos)
         return todo.step()
 
@@ -91,7 +90,6 @@ class LLMEngine:
         total_bsz = 0
         todos: list[BatchDecode] = []
         for i in reversed(range(len(decodes))):
-            print(decodes[i].bsz)
             if total_bsz + decodes[i].bsz <= self.max_total_bsz:
                 total_bsz += decodes[i].bsz
                 todos.append(decodes.pop(i))

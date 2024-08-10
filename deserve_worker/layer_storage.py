@@ -1,11 +1,12 @@
 import os
 import threading
 import traceback
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
 import torch
+from tqdm import tqdm
 
 from deserve_worker.model.args import ModelArgs
 from deserve_worker.model.context.forward import ForwardCtx
@@ -116,8 +117,9 @@ class LayerManager:
                 )
         return self.layer_storages[frozen_layer_names]
 
-    def fetch_layer(self, full_layer_name: str) -> str:
+    def fetch_layer(self, full_layer_name: str) -> None:
         model_name, layer_name = full_layer_name.split("/")
+
         path = os.path.join(self.cache_dir, model_name, f"{layer_name}.pt")
         if not os.path.exists(path):  # TODO lock
             os.makedirs(os.path.join(self.cache_dir, model_name), exist_ok=True)
@@ -129,59 +131,60 @@ class LayerManager:
                 with open(path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
-        return path
+
+        if model_name.startswith("llama-2-7b"):
+            model_args = ModelArgs(**llama_2_7b_args)  # type: ignore
+        elif model_name.startswith("llama-2-13b"):
+            model_args = ModelArgs(**llama_2_13b_args)  # type: ignore
+        elif model_name.startswith("llama-2-70b"):
+            model_args = ModelArgs(**llama_2_70b_args)  # type: ignore
+        elif model_name.startswith("llama-3-8b"):
+            model_args = ModelArgs(**llama_3_8b_args)  # type: ignore
+        elif model_name.startswith("llama-3-70b"):
+            model_args = ModelArgs(**llama_3_70b_args)  # type: ignore
+        else:
+            raise NotImplementedError("Unknown model")
+        l: torch.nn.Module
+        if layer_name == "tok_embeddings":
+            l = torch.nn.utils.skip_init(
+                TraceEmbedding,
+                ComponentId("tok_embeddings", "main"),
+                model_args.vocab_size,
+                model_args.dim,
+            )  # type: ignore
+        elif layer_name.startswith("layer"):
+            l = TransformerBlock(LayerId(f"{int(layer_name[7:]):02}"), model_args)
+        elif layer_name == "norm":
+            l = RMSNorm(
+                ComponentId("norm", "main"),
+                model_args.dim,
+                eps=model_args.norm_eps,
+            )
+        elif layer_name == "output":
+            l = torch.nn.utils.skip_init(
+                TraceLinear,
+                ComponentId("output", "main"),
+                model_args.dim,
+                model_args.vocab_size,
+            )  # type: ignore
+        else:
+            raise NotImplementedError("Unknown layers")
+
+        l.load_state_dict(torch.load(path, map_location="cpu"))
+        l.to(self.main_device)
+        self.layers[full_layer_name] = l
 
     def preload_layers(self, full_layer_names: list[str]) -> dict[str, torch.nn.Module]:
-        threads: list[tuple[str, Future[str]]] = []
+        threads: list[Future[None]] = []
         result = {}
         for full_layer_name in full_layer_names:
             if full_layer_name not in self.layers:
                 thread = self.network_executor.submit(self.fetch_layer, full_layer_name)
-                threads.append((full_layer_name, thread))
-        for full_layer_name, thread in threads:
-            path = thread.result()
-            model_name, layer_name = full_layer_name.split("/")
-            if model_name.startswith("llama-2-7b"):
-                model_args = ModelArgs(**llama_2_7b_args)  # type: ignore
-            elif model_name.startswith("llama-2-13b"):
-                model_args = ModelArgs(**llama_2_13b_args)  # type: ignore
-            elif model_name.startswith("llama-2-70b"):
-                model_args = ModelArgs(**llama_2_70b_args)  # type: ignore
-            elif model_name.startswith("llama-3-8b"):
-                model_args = ModelArgs(**llama_3_8b_args)  # type: ignore
-            elif model_name.startswith("llama-3-70b"):
-                model_args = ModelArgs(**llama_3_70b_args)  # type: ignore
-            else:
-                raise NotImplementedError("Unknown model")
-            l: torch.nn.Module
-            if layer_name == "tok_embeddings":
-                l = torch.nn.utils.skip_init(
-                    TraceEmbedding,
-                    ComponentId("tok_embeddings", "main"),
-                    model_args.vocab_size,
-                    model_args.dim,
-                )  # type: ignore
-            elif layer_name.startswith("layer"):
-                l = TransformerBlock(LayerId(f"{int(layer_name[7:]):02}"), model_args)
-            elif layer_name == "norm":
-                l = RMSNorm(
-                    ComponentId("norm", "main"),
-                    model_args.dim,
-                    eps=model_args.norm_eps,
-                )
-            elif layer_name == "output":
-                l = torch.nn.utils.skip_init(
-                    TraceLinear,
-                    ComponentId("output", "main"),
-                    model_args.dim,
-                    model_args.vocab_size,
-                )  # type: ignore
-            else:
-                raise NotImplementedError("Unknown layers")
-            l.load_state_dict(torch.load(path, map_location="cpu"))
-            l.to(self.main_device)
-            self.layers[full_layer_name] = l
-            print("Loaded", full_layer_name)
+                threads.append(thread)
+        with tqdm(total=len(threads)) as pbar:
+            for thread in as_completed(threads):
+                thread.result()
+                pbar.update(1)
         for full_layer_name in full_layer_names:
             result[full_layer_name] = self.layers[full_layer_name]
         return result
