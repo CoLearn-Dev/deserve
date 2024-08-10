@@ -67,11 +67,10 @@ class LLMExec:
     page_pool: PagePool
     task_datas: list[TaskData]
     bsz: int
-    need_sample: bool
 
     def post_process(self, result: torch.Tensor) -> list[LLMResponse]:
         responses: list[LLMResponse] = []
-        if self.need_sample:
+        if self.layer_storage.need_sample:
             ongoing_tokens, ongoing_ids, all_tokens, all_ids, done_ids = (
                 self.layer_storage.sample(result, self.task_datas)
             )
@@ -101,10 +100,7 @@ class BatchDecode(LLMExec):
             task_data for decode in decodes for task_data in decode.task_datas
         ]
         page_pool = decodes[0].page_pool
-        need_sample = decodes[0].need_sample
-        return BatchDecode(
-            xs, layer_storage, page_pool, task_datas, len(task_datas), need_sample
-        )
+        return BatchDecode(xs, layer_storage, page_pool, task_datas, len(task_datas))
 
     def step(self) -> list[LLMResponse]:
         with torch.inference_mode():
@@ -143,14 +139,12 @@ class BatchPrefill(LLMExec):
         seqlens = [task_data.seqlen for task_data in task_datas]
         layer_storage = prefills[0].layer_storage
         page_pool = prefills[0].page_pool
-        need_sample = prefills[0].need_sample
         return BatchPrefill(
             xs,
             layer_storage,
             page_pool,
             task_datas,
             len(task_datas),
-            need_sample,
             seqlens,
             total_seqlen=sum(seqlens),
         )
@@ -203,7 +197,7 @@ class SingleTrace(LLMExec):
 
     def post_process(self, result: torch.Tensor) -> list[LLMResponse]:
         responses: list[LLMResponse] = []
-        if self.need_sample:
+        if self.layer_storage.need_sample:
             _, _, all_tokens, all_ids, _ = self.layer_storage.sample(
                 result, self.task_datas
             )

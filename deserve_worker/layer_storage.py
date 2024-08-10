@@ -191,6 +191,9 @@ class LayerStorage:
     def __init__(self, layers: dict[str, torch.nn.Module], main_device: torch.device):
         self.main_device = main_device
         self.layers = layers
+        self.need_sample = any(
+            [full_layer_name.split("/")[1] == "output" for full_layer_name in layers]
+        )
 
     def clear(self) -> None:
         self.layers.clear()
