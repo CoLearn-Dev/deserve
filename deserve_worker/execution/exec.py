@@ -80,7 +80,7 @@ class LLMExec:
             responses.append(BatchUpdate(all_tokens, all_ids, done_ids))
         else:
             for task in self.task_datas:
-                task.start_pos += task.seqlen
+                task.start_pos += task.seqlen  # this has also be done in sampling
             responses.append(
                 BatchResult(result, [task.task_id for task in self.task_datas])
             )
@@ -204,18 +204,16 @@ class SingleTrace(LLMExec):
     def post_process(self, result: torch.Tensor) -> list[LLMResponse]:
         responses: list[LLMResponse] = []
         if self.need_sample:
-            ongoing_tokens, ongoing_ids, all_tokens, all_ids, done_ids = (
-                self.layer_storage.sample(result, self.task_datas)
+            _, _, all_tokens, all_ids, _ = self.layer_storage.sample(
+                result, self.task_datas
             )
-            if len(ongoing_tokens) > 0:
-                # at most have one
-                assert len(ongoing_tokens) == 1
-                responses.append(
-                    TraceResult(torch.cat(ongoing_tokens), ongoing_ids[0], self.traces)
-                )
-            responses.append(BatchUpdate(all_tokens, all_ids, done_ids))
+            assert len(all_tokens) == 1
+            responses.append(TraceResult(all_tokens[0], all_ids[0], self.traces))
         else:
             for task_data in self.task_datas:
                 task_data.start_pos += task_data.seqlen
-            responses.append(TraceResult(result, task_data.task_id, self.traces))
+            assert len(self.task_datas) == 1
+            responses.append(
+                TraceResult(result, self.task_datas[0].task_id, self.traces)
+            )
         return responses
