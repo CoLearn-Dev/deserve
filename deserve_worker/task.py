@@ -14,7 +14,8 @@ class PlanStep(BaseModel):
 class SamplingParams(BaseModel):
     temperature: float
     top_p: float
-    max_total_len: int
+    max_seq_len: int = 4096
+    max_new_tokens: int = 4096
 
 
 class TaskInfo(BaseModel):

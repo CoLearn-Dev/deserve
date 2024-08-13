@@ -17,6 +17,7 @@ from deserve_worker.execution.result import (
 )
 from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager
 from deserve_worker.kvcache.page_pool import PagePool
+from deserve_worker.resource import ResourceCollector
 
 from .execution.exec import BatchDecode, BatchPrefill, SingleTrace
 from .kvcache.kvcache import KVCache, main_device, main_dtype
@@ -47,9 +48,9 @@ class Worker:
         self.llm_engine = LLMEngine(max_total_bsz, 256, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
         self.page_pool = PagePool(40, 290, 256, main_device, main_dtype)
-        # TODO: in future, different cache manager could allocate on same memory
         self.paged_kvcache_manager = PagedKVCacheManager(self.page_pool)
         self.packed_kvcache_manager = PackedKVCacheManager(self.page_pool)
+        self.resource_collector = ResourceCollector()
         self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
 
         threading.Thread(target=self.llm_engine.run, daemon=True).start()
@@ -113,15 +114,13 @@ class Worker:
             task_data = self.init_task_data(task_info, is_trace=False)
             if isinstance(task_data, TaskData):
                 task_datas.append(task_data)
-                print("start_pos", task_data.start_pos)
-                print("seqlen", task_data.seqlen)
-                print("round", task_data.round)
                 ptr += task_data.seqlen
             else:
                 xs = torch.cat([xs[:ptr], xs[ptr + task_info.seqlen :]])
         if len(task_datas) == 0:
             return  # nothing happens
 
+        # currently, we do not allow prefills and decodes to be mixed in the same batch
         if round == 0:
             prefill = BatchPrefill(
                 xs=xs.to(main_device),

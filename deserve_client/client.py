@@ -106,6 +106,31 @@ def verify(
 
 
 @cli.command()
+def dryrun(
+    model: str,
+    bsz: int,
+    prefill_len: int,
+    decode_len: int,
+    entry_point: str = "http://localhost:19000",
+) -> None:
+    assert prefill_len > 0
+    response = requests.post(
+        f"{entry_point}/dryrun",
+        json={
+            "model": model,
+            "bsz": bsz,
+            "prefill_len": prefill_len,
+            "decode_len": decode_len,
+        },
+    )
+    if response.status_code != 200:
+        typer.echo("Error")
+        return
+    latency = response.json()
+    print("Time consumed:", latency * 1000, "ms")
+
+
+@cli.command()
 def test_range(
     model: str, prompt: str, len: int, entry_point: str = "http://localhost:19000"
 ) -> None:

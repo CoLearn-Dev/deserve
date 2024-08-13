@@ -2,6 +2,7 @@ import argparse
 import logging
 import pickle
 import queue
+import time
 import traceback
 import uuid
 from typing import Any, Generator, Optional
@@ -158,7 +159,7 @@ def complete(request: OnlineCompleteRequest) -> StreamingResponse:
         "task_id": task_id,
         "round": 0,
         "plan": plan,
-        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_total_len": 2048},
+        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
     }
     first_worker_url = plan[0].worker_url
     response = requests.post(
@@ -170,14 +171,68 @@ def complete(request: OnlineCompleteRequest) -> StreamingResponse:
     return StreamingResponse(relay_tokens(token_channel))
 
 
-class OfflineCompleteRequest(BaseModel):
+class DryRunRequest(BaseModel):
     model: str
-    prompts: list[str]
+    bsz: int
+    prefill_len: int
+    decode_len: int
 
 
-@app.post("/offline-complete")
-def offline_complete(request: OfflineCompleteRequest) -> None:
-    pass
+@app.post("/dryrun")
+def dry_run(request: DryRunRequest) -> float:
+    model = request.model
+    prompt = "A"
+
+    if model not in model2layers:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # init channel for relay
+    task_ids = []
+    task_infos = []
+    sampling_params = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_new_tokens": request.decode_len,
+    }
+    plan = generate_plan(model, list(workers.keys()))
+    for _ in range(request.bsz):
+        task_id = str(uuid.uuid4())
+        token_channel = queue.Queue[Optional[str]]()
+        token_channels[task_id] = token_channel
+        task_ids.append(task_id)
+        task_infos.append(
+            {
+                "task_id": task_id,
+                "plan": plan,
+                "round": 0,
+                "seqlen": 1,
+                "sampling_params": sampling_params,
+            }
+        )
+
+    begin = time.time()
+
+    # generate request
+    token: torch.Tensor = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
+    token = token.repeat(request.prefill_len)
+    tokens = torch.cat([token for _ in range(request.bsz)], dim=0)
+    plan = generate_plan(model, list(workers.keys()))
+    tensors = {"x": tokens}
+    metadata = {"task_infos": task_infos}
+    first_worker_url = plan[0].worker_url
+    response = requests.post(
+        f"{first_worker_url}/batch_forward", data=dumps(tensors, metadata)
+    )
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Worker error")
+
+    for task_id in task_ids:
+        while True:
+            if token_channels[task_id].get() is None:
+                break
+
+    end = time.time()
+    return end - begin
 
 
 def relay_traces(
@@ -229,7 +284,7 @@ def trace(request: TraceRequest) -> Response:
         "task_id": task_id,
         "round": 0,
         "plan": plan,
-        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_total_len": 2048},
+        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
     }
     first_worker_url = plan[0].worker_url
     response = requests.post(f"{first_worker_url}/trace", data=dumps(tensors, metadata))
