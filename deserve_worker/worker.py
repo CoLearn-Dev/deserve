@@ -9,10 +9,10 @@ import requests
 import torch
 from transformers import AutoTokenizer  # type: ignore
 
-from deserve_worker.execution.response import (
-    BatchResult,
+from deserve_worker.execution.result import (
+    BatchAct,
     BatchUpdate,
-    LLMResponse,
+    ExecResult,
     TraceResult,
 )
 from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager
@@ -24,7 +24,7 @@ from .kvcache.paged_kvcache import PagedKVCacheManager
 from .layer_storage import LayerManager
 from .llm_engine import LLMEngine
 from .model.utils import dumps
-from .task import PlanStep, SamplingParams, TaskData, TaskInfo
+from .task import PlanStep, SamplingParams, TaskData, TaskDataPlaceholder, TaskInfo
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 
@@ -43,7 +43,7 @@ class Worker:
         self.worker_url = worker_url
         self.controller_url = controller_url
         self.task_datas: dict[str, TaskData] = {}
-        self.relay_queue = queue.Queue[LLMResponse]()
+        self.relay_queue = queue.Queue[ExecResult]()
         self.llm_engine = LLMEngine(max_total_bsz, 256, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
         self.page_pool = PagePool(40, 290, 256, main_device, main_dtype)
@@ -62,9 +62,20 @@ class Worker:
             None,
         )
 
-    def init_forward_task_data(self, x: torch.Tensor, task_info: TaskInfo) -> TaskData:
-        if task_info.round == 0:
-            # TODO: need double check whether request is repeated
+    def init_task_data(
+        self, task_info: TaskInfo, is_trace: bool
+    ) -> TaskData | TaskDataPlaceholder:
+        """
+        When placeholder is placed, we should
+        """
+        if task_info.round == 0 and task_info.task_id not in self.task_datas:
+            if is_trace:
+                kvcache = self.packed_kvcache_manager.alloc(task_info.seqlen)
+            else:
+                kvcache = self.paged_kvcache_manager.alloc(task_info.seqlen)
+            assert (
+                kvcache is not None
+            )  # TODO: if it is none, we should have a something like "resource manager" to handle this
             task_data = TaskData(
                 task_id=task_info.task_id,
                 start_pos=0,
@@ -72,37 +83,15 @@ class Worker:
                 round=0,
                 seqlen=task_info.seqlen,
                 sampling_params=task_info.sampling_params,
-                kvcache=cast(
-                    KVCache, self.paged_kvcache_manager.alloc(task_info.seqlen)
-                ),
+                kvcache=kvcache,
             )
             self.task_datas[task_info.task_id] = task_data
-        else:
+        elif task_info.task_id in self.task_datas:
             task_data = self.task_datas[task_info.task_id]
             task_data.round = task_info.round
             task_data.seqlen = task_info.seqlen
-
-        return task_data
-
-    def init_trace_task_data(self, x: torch.Tensor, task_info: TaskInfo) -> TaskData:
-        if task_info.round == 0:
-            task_data = TaskData(
-                task_id=task_info.task_id,
-                start_pos=0,
-                plan=task_info.plan,
-                round=0,
-                seqlen=task_info.seqlen,
-                sampling_params=task_info.sampling_params,
-                kvcache=cast(
-                    KVCache, self.packed_kvcache_manager.alloc(task_info.seqlen)
-                ),
-            )
-            self.task_datas[task_info.task_id] = task_data
         else:
-            task_data = self.task_datas[task_info.task_id]
-            task_data.round = task_info.round
-            task_data.seqlen = task_info.seqlen
-
+            return task_info.into_task_data_placeholder()
         return task_data
 
     def batch_forward(
@@ -117,20 +106,28 @@ class Worker:
         layer_storage = self.layer_manager.get_layer_storage(
             task_infos[0].plan[index].layers
         )
-        task_datas = [
-            self.init_forward_task_data(xs, task_info) for task_info in task_infos
-        ]
-        seqlens = [task_info.seqlen for task_info in task_infos]
-        assert sum(seqlens) == xs.shape[0]
+
+        task_datas = []
+        ptr = 0
+        for task_info in task_infos:
+            task_data = self.init_task_data(task_info, is_trace=False)
+            if isinstance(task_data, TaskData):
+                task_datas.append(task_data)
+                print("start_pos", task_data.start_pos)
+                print("seqlen", task_data.seqlen)
+                print("round", task_data.round)
+                ptr += task_data.seqlen
+            else:
+                xs = torch.cat([xs[:ptr], xs[ptr + task_info.seqlen :]])
+        if len(task_datas) == 0:
+            return  # nothing happens
+
         if round == 0:
             prefill = BatchPrefill(
                 xs=xs.to(main_device),
                 layer_storage=layer_storage,
                 page_pool=self.page_pool,
                 task_datas=task_datas,
-                bsz=len(task_infos),
-                seqlens=seqlens,
-                total_seqlen=sum(seqlens),
             )
             self.llm_engine.add_request(prefill)
         else:
@@ -139,7 +136,6 @@ class Worker:
                 layer_storage=layer_storage,
                 page_pool=self.page_pool,
                 task_datas=task_datas,
-                bsz=len(task_infos),
             )
             self.llm_engine.add_request(decode)
 
@@ -157,27 +153,24 @@ class Worker:
 
         layer_storage = self.layer_manager.get_layer_storage(plan[index].layers)
         seqlen = x.shape[0]
-        task_datas = [
-            self.init_forward_task_data(
-                x,
-                TaskInfo(
-                    task_id=task_id,
-                    plan=plan,
-                    round=round,
-                    seqlen=seqlen,
-                    sampling_params=sampling_params,
-                ),
-            )
-        ]
+        task_data = self.init_task_data(
+            TaskInfo(
+                task_id=task_id,
+                plan=plan,
+                round=round,
+                seqlen=seqlen,
+                sampling_params=sampling_params,
+            ),
+            is_trace=False,
+        )
+        if isinstance(task_data, TaskDataPlaceholder):
+            return
         if round == 0:
             prefill = BatchPrefill(
                 xs=x.to(main_device),
                 layer_storage=layer_storage,
                 page_pool=self.page_pool,
-                task_datas=task_datas,
-                bsz=1,
-                seqlens=[seqlen],
-                total_seqlen=seqlen,
+                task_datas=[task_data],
             )
             self.llm_engine.add_request(prefill)
         else:
@@ -185,8 +178,7 @@ class Worker:
                 xs=x.to(main_device),
                 layer_storage=layer_storage,
                 page_pool=self.page_pool,
-                task_datas=task_datas,
-                bsz=1,
+                task_datas=[task_data],
             )
             self.llm_engine.add_request(decode)
 
@@ -204,22 +196,23 @@ class Worker:
 
         seqlen = x.shape[0]
         layer_storage = self.layer_manager.get_layer_storage(plan[index].layers)
+        task_data = self.init_task_data(
+            TaskInfo(
+                task_id=task_id,
+                plan=plan,
+                round=round,
+                seqlen=seqlen,
+                sampling_params=sampling_params,
+            ),
+            is_trace=True,
+        )
+        if isinstance(task_data, TaskDataPlaceholder):
+            return
+
         trace = SingleTrace(
             xs=x.to(main_device),
             layer_storage=layer_storage,
-            task_datas=[
-                self.init_trace_task_data(
-                    x,
-                    TaskInfo(
-                        task_id=task_id,
-                        plan=plan,
-                        round=round,
-                        seqlen=seqlen,
-                        sampling_params=sampling_params,
-                    ),
-                )
-            ],
-            bsz=1,
+            task_datas=[task_data],
             page_pool=self.page_pool,
             traces={},
         )
@@ -229,10 +222,9 @@ class Worker:
         q = self.relay_queue
         while True:
             result = q.get()
-            if isinstance(result, BatchResult):
-                task_id = result.task_ids[0]
-                task_info = self.task_datas[task_id]
-                plan = task_info.plan
+            if isinstance(result, BatchAct):
+                task_data = result.task_datas[0]
+                plan = task_data.plan
                 index = self.locate_in_plan(plan)
                 assert index is not None
                 next_index = (index + 1) % len(plan)
@@ -241,20 +233,8 @@ class Worker:
                     {"x": result.xs},
                     {
                         "task_infos": [
-                            {
-                                "task_id": task_id,
-                                "round": self.task_datas[task_id].round,
-                                "plan": plan,
-                                "seqlen": (
-                                    1
-                                    if self.task_datas[task_id].round != 0
-                                    else self.task_datas[task_id].seqlen
-                                ),
-                                "sampling_params": self.task_datas[
-                                    task_id
-                                ].sampling_params,
-                            }
-                            for task_id in result.task_ids
+                            task_data.into_task_info().model_dump()
+                            for task_data in result.task_datas
                         ],
                     },
                 )
@@ -265,10 +245,10 @@ class Worker:
                 )
             elif isinstance(result, BatchUpdate):
                 updated_tasks = []
-                for tokens, task_id in zip(result.tokens, result.task_ids):
+                for tokens, task_data in zip(result.tokens, result.task_datas):
                     updated_tasks.append(
                         {
-                            "task_id": task_id,
+                            "task_id": task_data.task_id,
                             "output_tokens": tokens.tolist(),
                         }
                     )
@@ -277,12 +257,11 @@ class Worker:
                     f"{self.controller_url}/update_tasks",
                     json=updated_tasks,
                 )
-                for task_id in result.cancel_ids:
-                    self.cancel(task_id, None, self.task_datas[task_id].plan)
+                for task_data in result.cancel_datas:
+                    self.cancel(task_data.task_id, None, task_data.plan)
             elif isinstance(result, TraceResult):
-                task_id = result.task_id
-                task_info = self.task_datas[task_id]
-                plan = task_info.plan
+                task_data = result.task_datas[0]
+                plan = task_data.plan
                 index = self.locate_in_plan(plan)
                 assert index is not None
                 next_index = (index + 1) % len(plan)
@@ -290,19 +269,14 @@ class Worker:
                     next_worker_url = plan[next_index].worker_url
                     data = dumps(
                         {"x": result.x},
-                        {
-                            "task_id": task_id,
-                            "round": self.task_datas[task_id].round,
-                            "plan": plan,
-                            "sampling_params": self.task_datas[task_id].sampling_params,
-                        },
+                        task_data.into_task_info().model_dump(),
                     )
                     self.network_executor.submit(
                         requests.post,
                         f"{next_worker_url}/trace",
                         data=data,
                     )
-                metadata: dict[str, Any] = {"task_id": task_id}
+                metadata: dict[str, Any] = {"task_id": task_data.task_id}
                 if next_index == 0:  # last worker
                     metadata["token"] = result.x.tolist()
                 data = dumps(
