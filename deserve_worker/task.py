@@ -24,6 +24,9 @@ class TaskInfo(BaseModel):
     seqlen: int
     sampling_params: SamplingParams
 
+    def into_task_data_placeholder(self) -> "TaskDataPlaceholder":
+        return TaskDataPlaceholder(task_id=self.task_id, seqlen=self.seqlen)
+
 
 @dataclass
 class TaskData:
@@ -37,3 +40,18 @@ class TaskData:
     """
     When flash attention is enabled, we use paged attention, otherwise the standard attention is adopted.
     """
+
+    def into_task_info(self) -> TaskInfo:
+        return TaskInfo(
+            task_id=self.task_id,
+            plan=self.plan,
+            round=self.round,
+            seqlen=self.seqlen,
+            sampling_params=self.sampling_params,
+        )
+
+
+@dataclass
+class TaskDataPlaceholder:
+    task_id: str
+    seqlen: int

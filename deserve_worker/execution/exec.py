@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Sequence
 
 import torch
 from flashinfer import (  # type: ignore
@@ -6,10 +7,10 @@ from flashinfer import (  # type: ignore
     BatchPrefillWithPagedKVCacheWrapper,
 )
 
-from deserve_worker.execution.response import (
-    BatchResult,
+from deserve_worker.execution.result import (
+    BatchAct,
     BatchUpdate,
-    LLMResponse,
+    ExecResult,
     TraceResult,
 )
 from deserve_worker.kvcache.kvcache import KVCacheManager, main_device
@@ -61,48 +62,57 @@ flash_global_freqs_cis = precompute_freqs_cis(128, 8192, 500000.0, True).to(main
 
 
 @dataclass
-class LLMExec:
+class BatchExec:
     xs: torch.Tensor  # stored in ragged format or packed format
     layer_storage: LayerStorage
     page_pool: PagePool
     task_datas: list[TaskData]
-    bsz: int
 
-    def post_process(self, result: torch.Tensor) -> list[LLMResponse]:
-        responses: list[LLMResponse] = []
+    def bsz(self) -> int:
+        return len(self.task_datas)
+
+    def seqlens(self) -> list[int]:
+        return [task_data.seqlen for task_data in self.task_datas]
+
+    def total_seqlen(self) -> int:
+        return sum(self.seqlens())
+
+    @staticmethod
+    def merge(execs: Sequence["BatchExec"]) -> "BatchExec":
+        xs = torch.cat([exec.xs for exec in execs])
+        layer_storage = execs[0].layer_storage
+        page_pool = execs[0].page_pool
+        task_datas = [task_data for exec in execs for task_data in exec.task_datas]
+        return BatchExec(xs, layer_storage, page_pool, task_datas)
+
+    def post_process(self, result: torch.Tensor) -> list[ExecResult]:
+        responses: list[ExecResult] = []
         if self.layer_storage.need_sample:
-            ongoing_tokens, ongoing_ids, all_tokens, all_ids, done_ids = (
+            ongoing_tokens, ongoing_datas, all_tokens, all_datas, done_datas = (
                 self.layer_storage.sample(result, self.task_datas)
             )
             if len(ongoing_tokens) > 0:
-                responses.append(BatchResult(torch.cat(ongoing_tokens), ongoing_ids))
-            responses.append(BatchUpdate(all_tokens, all_ids, done_ids))
+                responses.append(BatchAct(ongoing_datas, torch.cat(ongoing_tokens)))
+            responses.append(BatchUpdate(all_datas, all_tokens, done_datas))
         else:
             for task in self.task_datas:
                 task.start_pos += task.seqlen  # this has also be done in sampling
-            responses.append(
-                BatchResult(result, [task.task_id for task in self.task_datas])
-            )
+            responses.append(BatchAct(self.task_datas, result))
         return responses
 
 
 @dataclass
-class BatchDecode(LLMExec):
+class BatchDecode(BatchExec):
     """
     The tensor is stored in ragged format.
     """
 
     @staticmethod
-    def merge(decodes: list["BatchDecode"]) -> "BatchDecode":
-        xs = torch.cat([decode.xs for decode in decodes])
-        layer_storage = decodes[0].layer_storage
-        task_datas = [
-            task_data for decode in decodes for task_data in decode.task_datas
-        ]
-        page_pool = decodes[0].page_pool
-        return BatchDecode(xs, layer_storage, page_pool, task_datas, len(task_datas))
+    def merge(decodes: Sequence["BatchExec"]) -> "BatchDecode":
+        exec = BatchExec.merge(decodes)
+        return BatchDecode(exec.xs, exec.layer_storage, exec.page_pool, exec.task_datas)
 
-    def step(self) -> list[LLMResponse]:
+    def step(self) -> list[ExecResult]:
         with torch.inference_mode():
             decode_ctx = PagedDecodeCtx.init_paged_decode_ctx(
                 self.page_pool, self.task_datas, decode_wrapper
@@ -122,39 +132,24 @@ class BatchDecode(LLMExec):
 
 
 @dataclass
-class BatchPrefill(LLMExec):
+class BatchPrefill(BatchExec):
     """
     The tensor is stored in ragged format.
     """
 
-    seqlens: list[int]
-    total_seqlen: int
-
     @staticmethod
-    def merge(prefills: list["BatchPrefill"]) -> "BatchPrefill":
-        xs = torch.cat([prefill.xs for prefill in prefills])
-        task_datas = [
-            task_data for prefill in prefills for task_data in prefill.task_datas
-        ]
-        seqlens = [task_data.seqlen for task_data in task_datas]
-        layer_storage = prefills[0].layer_storage
-        page_pool = prefills[0].page_pool
+    def merge(prefills: Sequence["BatchExec"]) -> "BatchPrefill":
+        exec = BatchExec.merge(prefills)
         return BatchPrefill(
-            xs,
-            layer_storage,
-            page_pool,
-            task_datas,
-            len(task_datas),
-            seqlens,
-            total_seqlen=sum(seqlens),
+            exec.xs, exec.layer_storage, exec.page_pool, exec.task_datas
         )
 
-    def step(self) -> list[LLMResponse]:
+    def step(self) -> list[ExecResult]:
         with torch.inference_mode():
             prefill_ctx = PagedPrefillCtx.init_page_prefill_ctx(
                 self.page_pool,
                 self.task_datas,
-                self.seqlens,
+                self.seqlens(),
                 prefill_wrapper,
             )
             prefill_wrapper.begin_forward(
@@ -173,14 +168,14 @@ class BatchPrefill(LLMExec):
 
 
 @dataclass
-class SingleTrace(LLMExec):
+class SingleTrace(BatchExec):
     """
     The tensor is stored in packed format. Besides, these kinds of reequests are not allowed to be batched.
     """
 
     traces: dict[OpId, torch.Tensor]
 
-    def step(self) -> list[LLMResponse]:
+    def step(self) -> list[ExecResult]:
         with torch.inference_mode():
             forward_ctx = TraceForwardCtx.init_trace_forward_ctx(
                 self.page_pool,
@@ -195,19 +190,17 @@ class SingleTrace(LLMExec):
             prefill_wrapper.end_forward()
             return self.post_process(result)
 
-    def post_process(self, result: torch.Tensor) -> list[LLMResponse]:
-        responses: list[LLMResponse] = []
+    def post_process(self, result: torch.Tensor) -> list[ExecResult]:
+        responses: list[ExecResult] = []
         if self.layer_storage.need_sample:
-            _, _, all_tokens, all_ids, _ = self.layer_storage.sample(
+            _, _, all_tokens, all_datas, _ = self.layer_storage.sample(
                 result, self.task_datas
             )
             assert len(all_tokens) == 1
-            responses.append(TraceResult(all_tokens[0], all_ids[0], self.traces))
+            responses.append(TraceResult(all_datas, all_tokens[0], self.traces))
         else:
             for task_data in self.task_datas:
                 task_data.start_pos += task_data.seqlen
             assert len(self.task_datas) == 1
-            responses.append(
-                TraceResult(result, self.task_datas[0].task_id, self.traces)
-            )
+            responses.append(TraceResult(self.task_datas, result, self.traces))
         return responses

@@ -219,14 +219,18 @@ class LayerStorage:
         return h
 
     @torch.inference_mode()
-    def sample(
-        self, merged_h: torch.Tensor, task_datas: list[TaskData]
-    ) -> tuple[list[torch.Tensor], list[str], list[torch.Tensor], list[str], list[str]]:
+    def sample(self, merged_h: torch.Tensor, task_datas: list[TaskData]) -> tuple[
+        list[torch.Tensor],
+        list[TaskData],
+        list[torch.Tensor],
+        list[TaskData],
+        list[TaskData],
+    ]:
         ongoing_tokens = []
-        ongoing_ids = []
+        ongoing_datas = []
         all_tokens = []
-        all_ids = []
-        done_ids = []
+        all_datas = []
+        done_datas = []
         ptr = 0
         for task_data in task_datas:
             seqlen = task_data.seqlen
@@ -234,6 +238,9 @@ class LayerStorage:
             ptr += seqlen
             task_data.start_pos += seqlen
             task_data.round += 1
+            task_data.seqlen = (
+                1  # TODO: make more sense for updating task data values here
+            )
             sampling_params = task_data.sampling_params
             if task_data.start_pos >= sampling_params.max_total_len:
                 next_token = torch.tensor([EOS_TOKEN_ID])
@@ -243,11 +250,11 @@ class LayerStorage:
             else:
                 next_token = torch.argmax(h[-1], dim=-1).reshape(1)
             next_token = next_token.to("cpu")
-            all_ids.append(task_data.task_id)
+            all_datas.append(task_data)
             all_tokens.append(next_token)
             if next_token[0] in STOP_TOKEN_IDS:
-                done_ids.append(task_data.task_id)
+                done_datas.append(task_data)
             else:
-                ongoing_ids.append(task_data.task_id)
+                ongoing_datas.append(task_data)
                 ongoing_tokens.append(next_token)
-        return ongoing_tokens, ongoing_ids, all_tokens, all_ids, done_ids
+        return ongoing_tokens, ongoing_datas, all_tokens, all_datas, done_datas
