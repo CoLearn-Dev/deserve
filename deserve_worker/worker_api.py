@@ -91,4 +91,4 @@ if __name__ == "__main__":
         args.batch_size,
         args.controller_url,
     )
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    uvicorn.run(app, host="0.0.0.0", port=args.port)
