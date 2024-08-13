@@ -10,6 +10,7 @@ from flashinfer import (  # type: ignore
 from deserve_worker.kvcache.kvcache import main_device
 from deserve_worker.kvcache.page_pool import PagePool
 from deserve_worker.kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManager
+from deserve_worker.model.args import ModelArgs
 from deserve_worker.model.context.forward import ForwardCtx
 from deserve_worker.task import TaskData
 
@@ -26,7 +27,6 @@ class PagedForwardCtx(ForwardCtx):
         page_pool: PagePool, task_datas: list[TaskData], seqlens: list[int]
     ) -> "PagedForwardCtx":
         kv_last_page_lens = []
-        bsz = len(task_datas)
         for task_data, seqlen in zip(task_datas, seqlens):
             kvcache = cast(PagedKVCache, task_data.kvcache)
             total_len = task_data.start_pos + seqlen
