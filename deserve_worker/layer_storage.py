@@ -242,17 +242,21 @@ class LayerStorage:
                 1  # TODO: make more sense for updating task data values here
             )
             sampling_params = task_data.sampling_params
-            if task_data.start_pos >= sampling_params.max_total_len:
-                next_token = torch.tensor([EOS_TOKEN_ID])
-            elif sampling_params.temperature > 0:
+            sampling_params.max_new_tokens -= 1
+            if sampling_params.temperature > 0:
                 probs = torch.softmax(h[-1] / sampling_params.temperature, dim=-1)
                 next_token = sample_top_p(probs, sampling_params.top_p).reshape(1)
             else:
                 next_token = torch.argmax(h[-1], dim=-1).reshape(1)
             next_token = next_token.to("cpu")
+            if next_token[0] not in STOP_TOKEN_IDS and (
+                sampling_params.max_new_tokens <= 0
+                or task_data.start_pos >= sampling_params.max_seq_len
+            ):
+                next_token = torch.cat([next_token, torch.tensor([EOS_TOKEN_ID])])
             all_datas.append(task_data)
             all_tokens.append(next_token)
-            if next_token[0] in STOP_TOKEN_IDS:
+            if next_token[-1] in STOP_TOKEN_IDS or sampling_params.max_new_tokens <= 0:
                 done_datas.append(task_data)
             else:
                 ongoing_datas.append(task_data)
