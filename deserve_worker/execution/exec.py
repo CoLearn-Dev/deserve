@@ -117,14 +117,15 @@ class BatchDecode(BatchExec):
             decode_ctx = PagedDecodeCtx.init_paged_decode_ctx(
                 self.page_pool, self.task_datas, decode_wrapper
             )
+            model_args = self.layer_storage.model_args
             decode_wrapper.begin_forward(
                 indptr=decode_ctx.kv_page_indptr,
                 indices=decode_ctx.kv_page_indices,
                 last_page_len=decode_ctx.kv_last_page_lens,
-                num_qo_heads=64,
-                num_kv_heads=8,
-                head_dim=128,
-                page_size=256,
+                num_qo_heads=model_args.n_heads,
+                num_kv_heads=model_args.n_kv_heads,
+                head_dim=model_args.dim // model_args.n_heads,
+                page_size=model_args.page_size,
             )
             result = self.layer_storage.forward(self.xs, decode_ctx)
             decode_wrapper.end_forward()
@@ -152,15 +153,16 @@ class BatchPrefill(BatchExec):
                 self.seqlens(),
                 prefill_wrapper,
             )
+            model_args = self.layer_storage.model_args
             prefill_wrapper.begin_forward(
                 qo_indptr=prefill_ctx.indptr,
                 paged_kv_indptr=prefill_ctx.kv_page_indptr,
                 paged_kv_indices=prefill_ctx.kv_page_indices,
                 paged_kv_last_page_len=prefill_ctx.kv_last_page_lens,
-                num_qo_heads=64,
-                num_kv_heads=8,
-                head_dim=128,
-                page_size=256,
+                num_qo_heads=model_args.n_heads,
+                num_kv_heads=model_args.n_kv_heads,
+                head_dim=model_args.dim // model_args.n_heads,
+                page_size=model_args.page_size,
             )
             result = self.layer_storage.forward(self.xs, prefill_ctx)
             prefill_wrapper.end_forward()

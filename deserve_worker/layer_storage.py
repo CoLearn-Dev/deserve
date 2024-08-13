@@ -8,7 +8,14 @@ import requests
 import torch
 from tqdm import tqdm
 
-from deserve_worker.model.args import ModelArgs
+from deserve_worker.model.args import (
+    ModelArgs,
+    llama_2_7b_args,
+    llama_2_13b_args,
+    llama_2_70b_args,
+    llama_3_8b_args,
+    llama_3_70b_args,
+)
 from deserve_worker.model.context.forward import ForwardCtx
 from deserve_worker.model.layer.linear import TraceEmbedding, TraceLinear
 from deserve_worker.model.layer.norm import RMSNorm
@@ -18,59 +25,6 @@ from deserve_worker.trace import ComponentId, LayerId, OpId
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 STOP_TOKEN_IDS = [128001, 128009]
-
-llama_2_7b_args = {
-    "dim": 4096,
-    "multiple_of": 256,
-    "n_heads": 32,
-    "n_layers": 32,
-    "norm_eps": 1e-06,
-    "vocab_size": 32000,
-}
-
-llama_2_13b_args = {
-    "dim": 5120,
-    "multiple_of": 256,
-    "n_heads": 40,
-    "n_layers": 40,
-    "norm_eps": 1e-05,
-    "vocab_size": 32000,
-}
-
-llama_2_70b_args = {
-    "dim": 8192,
-    "multiple_of": 4096,
-    "ffn_dim_multiplier": 1.3,
-    "n_heads": 64,
-    "n_kv_heads": 8,
-    "n_layers": 80,
-    "norm_eps": 1e-05,
-    "vocab_size": 32000,
-}
-
-llama_3_8b_args = {
-    "dim": 4096,
-    "n_layers": 32,
-    "n_heads": 32,
-    "n_kv_heads": 8,
-    "vocab_size": 128256,
-    "multiple_of": 1024,
-    "ffn_dim_multiplier": 1.3,
-    "norm_eps": 1e-05,
-    "rope_theta": 500000.0,
-}
-
-llama_3_70b_args = {
-    "dim": 8192,
-    "ffn_dim_multiplier": 1.3,
-    "multiple_of": 1024,
-    "n_heads": 64,
-    "n_kv_heads": 8,
-    "n_layers": 80,
-    "norm_eps": 1e-05,
-    "vocab_size": 128256,
-    "rope_theta": 500000.0,
-}
 
 
 def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
@@ -108,16 +62,35 @@ class LayerManager:
         self.layers: dict[str, torch.nn.Module] = {}
         self.mutex = threading.Lock()
 
+    def get_model_args(self, model_name: str) -> ModelArgs:
+        if model_name.startswith("llama-2-7b"):
+            return llama_2_7b_args
+        elif model_name.startswith("llama-2-13b"):
+            return llama_2_13b_args
+        elif model_name.startswith("llama-2-70b"):
+            return llama_2_70b_args
+        elif model_name.startswith("llama-3-8b"):
+            return llama_3_8b_args
+        elif model_name.startswith("llama-3-70b"):
+            return llama_3_70b_args
+        else:
+            raise NotImplementedError("Unknown model")
+
     def get_layer_storage(self, layer_names: list[str]) -> "LayerStorage":
+        model_name, _ = layer_names[0].split("/")
+        model_args = self.get_model_args(model_name)
+
         frozen_layer_names = frozenset(layer_names)
         if frozen_layer_names not in self.layer_storages:
             with self.mutex:
                 self.layer_storages[frozen_layer_names] = LayerStorage(
-                    self.preload_layers(layer_names), self.main_device
+                    self.preload_layers(layer_names, model_args),
+                    model_args,
+                    self.main_device,
                 )
         return self.layer_storages[frozen_layer_names]
 
-    def fetch_layer(self, full_layer_name: str) -> None:
+    def fetch_layer(self, full_layer_name: str, model_args: ModelArgs) -> None:
         model_name, layer_name = full_layer_name.split("/")
 
         path = os.path.join(self.cache_dir, model_name, f"{layer_name}.pt")
@@ -132,18 +105,6 @@ class LayerManager:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
 
-        if model_name.startswith("llama-2-7b"):
-            model_args = ModelArgs(**llama_2_7b_args)  # type: ignore
-        elif model_name.startswith("llama-2-13b"):
-            model_args = ModelArgs(**llama_2_13b_args)  # type: ignore
-        elif model_name.startswith("llama-2-70b"):
-            model_args = ModelArgs(**llama_2_70b_args)  # type: ignore
-        elif model_name.startswith("llama-3-8b"):
-            model_args = ModelArgs(**llama_3_8b_args)  # type: ignore
-        elif model_name.startswith("llama-3-70b"):
-            model_args = ModelArgs(**llama_3_70b_args)  # type: ignore
-        else:
-            raise NotImplementedError("Unknown model")
         l: torch.nn.Module
         if layer_name == "tok_embeddings":
             l = torch.nn.utils.skip_init(
@@ -174,12 +135,12 @@ class LayerManager:
         l.to(self.main_device)
         self.layers[full_layer_name] = l
 
-    def preload_layers(self, full_layer_names: list[str]) -> dict[str, torch.nn.Module]:
+    def preload_layers(self, full_layer_names: list[str], model_args: ModelArgs) -> dict[str, torch.nn.Module]:
         threads: list[Future[None]] = []
         result = {}
         for full_layer_name in full_layer_names:
             if full_layer_name not in self.layers:
-                thread = self.network_executor.submit(self.fetch_layer, full_layer_name)
+                thread = self.network_executor.submit(self.fetch_layer, full_layer_name, model_args)
                 threads.append(thread)
         with tqdm(total=len(threads)) as pbar:
             for thread in as_completed(threads):
@@ -191,9 +152,15 @@ class LayerManager:
 
 
 class LayerStorage:
-    def __init__(self, layers: dict[str, torch.nn.Module], main_device: torch.device):
+    def __init__(
+        self,
+        layers: dict[str, torch.nn.Module],
+        model_args: ModelArgs,
+        main_device: torch.device,
+    ):
         self.main_device = main_device
         self.layers = layers
+        self.model_args = model_args
         self.need_sample = any(
             [full_layer_name.split("/")[1] == "output" for full_layer_name in layers]
         )
