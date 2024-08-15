@@ -29,8 +29,8 @@ def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     """
 
     metadata_length = int.from_bytes(b[:4], byteorder="big")
-    metadata = pickle.loads(b[4: 4 + metadata_length])
-    tensors = load(b[4 + metadata_length:])
+    metadata = pickle.loads(b[4 : 4 + metadata_length])
+    tensors = load(b[4 + metadata_length :])
     return tensors, metadata
 
 

@@ -7,29 +7,19 @@ from typing import Any, Optional, cast
 
 import requests
 import torch
-# from transformers import AutoTokenizer  # type: ignore
-
-from .execution.result import (
-    BatchAct,
-    BatchUpdate,
-    ExecResult,
-    TraceResult,
-)
-from .kvcache.packed_kvcache import PackedKVCacheManager
-from .kvcache.page_pool import PagePool
-from .resource import ResourceCollector
 
 from .execution.exec import BatchDecode, BatchPrefill, SingleTrace
+from .execution.result import BatchAct, BatchUpdate, ExecResult, TraceResult
 from .kvcache.kvcache import KVCache, main_device, main_dtype
+from .kvcache.packed_kvcache import PackedKVCacheManager
+from .kvcache.page_pool import PagePool
 from .kvcache.paged_kvcache import PagedKVCacheManager
 from .layer_storage import LayerManager
 from .llm_engine import LLMEngine
+from .model.args import llama_3_70b_args
 from .model.utils import dumps
+from .resource import ResourceCollector
 from .task import PlanStep, SamplingParams, TaskData, TaskDataPlaceholder, TaskInfo
-
-EOS_TOKEN_ID = 128001  # for llama 3 only
-
-# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
 
 class Worker:
@@ -47,7 +37,9 @@ class Worker:
         self.relay_queue = queue.Queue[ExecResult]()
         self.llm_engine = LLMEngine(max_total_bsz, 256, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
-        self.page_pool = PagePool(40, 290, 256, main_device, main_dtype)
+        self.page_pool = PagePool(
+            40, 290, llama_3_70b_args.page_size, main_device, main_dtype
+        )
         self.paged_kvcache_manager = PagedKVCacheManager(self.page_pool)
         self.packed_kvcache_manager = PackedKVCacheManager(self.page_pool)
         self.resource_collector = ResourceCollector()
