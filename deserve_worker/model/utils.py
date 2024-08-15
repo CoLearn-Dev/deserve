@@ -1,8 +1,8 @@
 import pickle
 from typing import Any
 
-import safetensors
 import torch
+from safetensors.torch import load, save
 
 from deserve_worker.model.context.forward import ForwardCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
@@ -15,7 +15,7 @@ def dumps(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> bytes:
     """
 
     metadata_bytes = pickle.dumps(metadata)
-    tensors_bytes = safetensors.torch.save(tensors)
+    tensors_bytes = save(tensors)
     return (
         len(metadata_bytes).to_bytes(4, byteorder="big")
         + metadata_bytes
@@ -29,8 +29,8 @@ def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     """
 
     metadata_length = int.from_bytes(b[:4], byteorder="big")
-    metadata = pickle.loads(b[4 : 4 + metadata_length])
-    tensors = safetensors.torch.load(b[4 + metadata_length :])
+    metadata = pickle.loads(b[4: 4 + metadata_length])
+    tensors = load(b[4 + metadata_length:])
     return tensors, metadata
 
 

@@ -3,8 +3,6 @@ from typing import Optional
 
 import torch
 
-KV_CACHE_BLOCK_SIZE = 256
-
 main_dtype = torch.float16
 main_device = torch.device("cuda")
 torch.set_default_dtype(main_dtype)  # type: ignore
