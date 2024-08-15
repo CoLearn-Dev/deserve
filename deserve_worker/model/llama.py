@@ -1,13 +1,4 @@
-# This software may be used and distributed according to the terms of the Llama 3 Community License Agreement.
-
-import math
-import pickle
-from dataclasses import dataclass
-from typing import Any, List, Mapping, Optional, Tuple, cast
-
-import safetensors.torch
 import torch
-import torch.nn.functional as F
 
 from deserve_worker.model.args import ModelArgs
 from deserve_worker.model.context.forward import ForwardCtx
@@ -15,7 +6,7 @@ from deserve_worker.model.layer.attention import Attention
 from deserve_worker.model.layer.linear import FeedForward
 from deserve_worker.model.layer.norm import RMSNorm
 from deserve_worker.model.utils import trace_op
-from deserve_worker.trace import ComponentId, LayerId, OpId
+from deserve_worker.trace import LayerId
 
 
 class TransformerBlock(torch.nn.Module):

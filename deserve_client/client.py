@@ -1,11 +1,10 @@
 import pickle
-import traceback
 from typing import Any, Optional
 
 import requests
-import safetensors.torch
 import torch
 import typer
+from safetensors.torch import load
 from transformers import AutoTokenizer  # type: ignore
 
 from deserve_client.model import (
@@ -29,7 +28,7 @@ def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
 
     metadata_length = int.from_bytes(b[:4], byteorder="big")
     metadata = pickle.loads(b[4 : 4 + metadata_length])
-    tensors = safetensors.torch.load(b[4 + metadata_length :])
+    tensors = load(b[4 + metadata_length :])
     return tensors, metadata
 
 

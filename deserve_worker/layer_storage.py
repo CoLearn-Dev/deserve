@@ -135,12 +135,16 @@ class LayerManager:
         l.to(self.main_device)
         self.layers[full_layer_name] = l
 
-    def preload_layers(self, full_layer_names: list[str], model_args: ModelArgs) -> dict[str, torch.nn.Module]:
+    def preload_layers(
+        self, full_layer_names: list[str], model_args: ModelArgs
+    ) -> dict[str, torch.nn.Module]:
         threads: list[Future[None]] = []
         result = {}
         for full_layer_name in full_layer_names:
             if full_layer_name not in self.layers:
-                thread = self.network_executor.submit(self.fetch_layer, full_layer_name, model_args)
+                thread = self.network_executor.submit(
+                    self.fetch_layer, full_layer_name, model_args
+                )
                 threads.append(thread)
         with tqdm(total=len(threads)) as pbar:
             for thread in as_completed(threads):
@@ -201,7 +205,7 @@ class LayerStorage:
         ptr = 0
         for task_data in task_datas:
             seqlen = task_data.seqlen
-            h = merged_h[ptr: ptr + seqlen]
+            h = merged_h[ptr : ptr + seqlen]
             ptr += seqlen
             task_data.start_pos += seqlen
             task_data.round += 1
