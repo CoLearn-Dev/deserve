@@ -131,7 +131,7 @@ class LayerManager:
         else:
             raise NotImplementedError("Unknown layers")
 
-        l.load_state_dict(torch.load(path, map_location="cpu"))
+        l.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         l.to(self.main_device)
         self.layers[full_layer_name] = l
 
@@ -201,7 +201,7 @@ class LayerStorage:
         ptr = 0
         for task_data in task_datas:
             seqlen = task_data.seqlen
-            h = merged_h[ptr : ptr + seqlen]
+            h = merged_h[ptr: ptr + seqlen]
             ptr += seqlen
             task_data.start_pos += seqlen
             task_data.round += 1

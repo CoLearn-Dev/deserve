@@ -5,6 +5,9 @@ from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
+import threading
+import time
+from collections import deque
 
 from .model.utils import loads
 from .task import PlanStep, SamplingParams, TaskInfo
@@ -14,16 +17,58 @@ app = FastAPI()
 worker: Worker
 runtime_executor = ThreadPoolExecutor(max_workers=96)
 
+pending_batch_forward = deque()
+pending_tasks = deque()
+mutex = threading.Lock()  # may not be necessary if the async worker has only one thread?
+last_check_pending_time = 0.0
+
+
+def check_pending():
+    with mutex:
+        print("check_pending", len(pending_batch_forward), len(pending_tasks), worker.page_pool.num_avails, worker.page_pool.num_blocks)
+        global last_check_pending_time
+        if last_check_pending_time+1.0 > time.time():
+            return
+        last_check_pending_time = time.time()
+        num_avails = worker.page_pool.num_avails
+        # while len(pending_batch_forward) > 0 and num_avails/worker.page_pool.num_blocks >= 0.1:
+        #     tensors, metadata = pending_batch_forward.popleft()
+        #     num_avails -=
+        #     runtime_executor.submit(
+        #         worker.batch_forward,
+        #         tensors["x"],
+        #         [TaskInfo.model_validate(task_info) for task_info in metadata["task_infos"]],
+        #     )
+        while len(pending_tasks) > 0 and num_avails/worker.page_pool.num_blocks >= 0.2:
+            tensors, metadata = pending_tasks.popleft()
+            num_avails -= tensors["x"].shape[0]//worker.page_pool.block_size+1
+            runtime_executor.submit(
+                worker.forward,
+                tensors["x"],
+                metadata["task_id"],
+                metadata["round"],
+                [PlanStep.model_validate(step) for step in metadata["plan"]],
+                SamplingParams.model_validate(metadata["sampling_params"]),
+            )
+
 
 @app.post("/batch_forward")
 async def batch_forward(request: Request) -> str:
-    body = await request.body()
-    tensors, metadata = loads(body)
-    runtime_executor.submit(
-        worker.batch_forward,
-        tensors["x"],
-        [TaskInfo.model_validate(task_info) for task_info in metadata["task_infos"]],
-    )
+    try:
+        body = await request.body()
+        tensors, metadata = loads(body)
+        if worker.worker_id == metadata["task_infos"][0]["plan"][0]["worker_id"]:
+            check_pending()
+            # if worker.page_pool.num_avails/worker.page_pool.num_blocks < 0.1:
+            #     pending_batch_forward.append((tensors, metadata))
+            #     return "ok"
+        runtime_executor.submit(
+            worker.batch_forward,
+            tensors["x"],
+            [TaskInfo.model_validate(task_info) for task_info in metadata["task_infos"]],
+        )
+    except Exception as e:
+        traceback.print_exc()
     return "ok"
 
 
@@ -32,6 +77,11 @@ async def forward(request: Request) -> str:
     try:
         body = await request.body()
         tensors, metadata = loads(body)
+        if worker.worker_id == metadata["plan"][0]["worker_id"]:
+            check_pending()
+            if worker.page_pool.num_avails/worker.page_pool.num_blocks < 0.2:
+                pending_tasks.append((tensors, metadata))
+                return "ok"
         runtime_executor.submit(
             worker.forward,
             tensors["x"],

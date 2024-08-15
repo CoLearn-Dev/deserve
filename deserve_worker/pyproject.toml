@@ -5,9 +5,23 @@ authors = [
   { name="Example Author", email="author@example.com" },
 ]
 description = "Deserve Worker"
+dependencies = [
+  "fastapi",
+  "pydantic",
+  "requests",
+  "safetensors",
+  "torch==2.4",
+  "numpy",
+  "tqdm",
+  "uvicorn",
+  "flashinfer",
+]
 requires-python = ">=3.11"
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
 ]
+
+[tool.setuptools]
+py-modules = []

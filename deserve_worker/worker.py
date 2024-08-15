@@ -7,17 +7,17 @@ from typing import Any, Optional, cast
 
 import requests
 import torch
-from transformers import AutoTokenizer  # type: ignore
+# from transformers import AutoTokenizer  # type: ignore
 
-from deserve_worker.execution.result import (
+from .execution.result import (
     BatchAct,
     BatchUpdate,
     ExecResult,
     TraceResult,
 )
-from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager
-from deserve_worker.kvcache.page_pool import PagePool
-from deserve_worker.resource import ResourceCollector
+from .kvcache.packed_kvcache import PackedKVCacheManager
+from .kvcache.page_pool import PagePool
+from .resource import ResourceCollector
 
 from .execution.exec import BatchDecode, BatchPrefill, SingleTrace
 from .kvcache.kvcache import KVCache, main_device, main_dtype
@@ -29,7 +29,7 @@ from .task import PlanStep, SamplingParams, TaskData, TaskDataPlaceholder, TaskI
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
 
 class Worker:

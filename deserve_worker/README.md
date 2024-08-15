@@ -1,15 +1,20 @@
 # DeServe Worker 
 
+## Install
+```
+pip install -e deserve_worker --extra-index-url https://flashinfer.ai/whl/cu124/torch2.4/
+```
+
 ## How to run
 
 ```bash 
-python3 -m deserve_worker.worker_api <port> <worker_id>
+python3 -m deserve_worker.worker_api --batch-size BATCH_SIZE --port PORT --controller-url CONTROLLER_URL id
 ```
 
 For example,
 
 ```bash 
-python3 -m deserve_worker.worker_api 8080 worker0
+python3 -m deserve_worker.worker_api --batch-size 48 --port 8080 worker0
 ```
 
 ## API
