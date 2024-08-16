@@ -1,23 +1,31 @@
 import threading
-from typing import Optional, cast
+from queue import Queue
+from typing import Optional
 
 import torch
+
+from deserve_worker.engine.event.base import EngineEvent, MoreSpaceEvent
+
+
+def calc_pages_needed_num(total_len: int, page_size: int) -> int:
+    return (total_len + page_size - 1) // page_size
 
 
 class PagePool:
     def __init__(
         self,
         num_layers: int,
-        num_blocks: int,
-        block_size: int,
+        num_pages: int,
+        page_size: int,
+        sender: Queue[EngineEvent],
         main_device: torch.device,
         main_dtype: torch.dtype,
     ):
-        # self.num_layers = num_layers
         self.num_layers = num_layers
-        self.num_blocks = num_blocks
-        self.num_avails = num_blocks
-        self.block_size = block_size
+        self.num_pages = num_pages
+        self.num_avails = num_pages
+        self.page_size = page_size
+        self.sender = sender
         self.main_device = main_device
         self.main_dtype = main_dtype
         self.fetch_size = 64
@@ -25,7 +33,7 @@ class PagePool:
 
         self.pages_k = [
             torch.empty(
-                (num_blocks, block_size, 8, 128),
+                (num_pages, page_size, 8, 128),
                 device=main_device,
                 dtype=main_dtype,
             )
@@ -33,14 +41,14 @@ class PagePool:
         ]
         self.pages_v = [
             torch.empty(
-                (num_blocks, block_size, 8, 128),
+                (num_pages, page_size, 8, 128),
                 device=main_device,
                 dtype=main_dtype,
             )
             for _ in range(num_layers)
         ]
         self.page_bitmap = torch.ones(
-            (num_blocks,), device=main_device, dtype=torch.bool
+            (num_pages,), device=main_device, dtype=torch.bool
         )
         self.page_buffer = torch.empty(0, device=main_device, dtype=torch.int32)
 
@@ -78,6 +86,7 @@ class PagePool:
 
     def recycle(self, blocks: torch.Tensor) -> None:
         with self.mutex:
+            self.sender.put(MoreSpaceEvent())
             self.num_avails += blocks.shape[0]
             self.page_bitmap[blocks] = True
 

@@ -77,6 +77,17 @@ class BatchExec:
     def total_seqlen(self) -> int:
         return sum(self.seqlens())
 
+    def get_extended_pages_num(self) -> int:
+        return sum(
+            [
+                task_data.get_extended_pages_num(self.page_pool.page_size)
+                for task_data in self.task_datas
+            ]
+        )
+
+    def check_kvcache_available(self) -> bool:
+        return self.get_extended_pages_num() <= self.page_pool.num_pages
+
     @staticmethod
     def merge(execs: Sequence["BatchExec"]) -> "BatchExec":
         xs = torch.cat([exec.xs for exec in execs])
@@ -84,6 +95,21 @@ class BatchExec:
         page_pool = execs[0].page_pool
         task_datas = [task_data for exec in execs for task_data in exec.task_datas]
         return BatchExec(xs, layer_storage, page_pool, task_datas)
+
+    def split(self) -> Sequence["BatchExec"]:
+        start_pos = 0
+        execs = []
+        for task_data in self.task_datas:
+            execs.append(
+                BatchExec(
+                    self.xs[start_pos : start_pos + task_data.seqlen],
+                    self.layer_storage,
+                    self.page_pool,
+                    [task_data],
+                )
+            )
+            start_pos += task_data.seqlen
+        return execs
 
     def post_process(self, result: torch.Tensor) -> list[ExecResult]:
         responses: list[ExecResult] = []
@@ -111,6 +137,15 @@ class BatchDecode(BatchExec):
     def merge(decodes: Sequence["BatchExec"]) -> "BatchDecode":
         exec = BatchExec.merge(decodes)
         return BatchDecode(exec.xs, exec.layer_storage, exec.page_pool, exec.task_datas)
+
+    def split(self) -> Sequence["BatchDecode"]:
+        results = super().split()
+        return [
+            BatchDecode(
+                result.xs, result.layer_storage, result.page_pool, result.task_datas
+            )
+            for result in results
+        ]
 
     def step(self) -> list[ExecResult]:
         with torch.inference_mode():

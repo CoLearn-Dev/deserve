@@ -30,7 +30,8 @@ class PagedForwardCtx(ForwardCtx):
         for task_data, seqlen in zip(task_datas, seqlens):
             kvcache = cast(PagedKVCache, task_data.kvcache)
             total_len = task_data.start_pos + seqlen
-            kvcache.renew(total_len)
+            if not kvcache.renew(total_len):
+                raise RuntimeError("KV cache renew failed")
             kv_last_page_lens.append((total_len - 1) % kvcache.manager.block_size + 1)
         kvcache_list = [
             cast(PagedKVCache, task_data.kvcache).block_table.view(-1)
