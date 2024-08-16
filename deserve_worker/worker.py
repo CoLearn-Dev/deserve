@@ -38,11 +38,12 @@ class Worker:
         self.llm_engine = LLMEngine(max_total_bsz, 256, self.relay_queue)
         self.layer_manager = LayerManager(main_device)
         self.page_pool = PagePool(
-            40, 290, llama_3_70b_args.page_size, main_device, main_dtype
+            40, llama_3_70b_args.num_pages, llama_3_70b_args.page_size, main_device, main_dtype
         )
         self.paged_kvcache_manager = PagedKVCacheManager(self.page_pool)
         self.packed_kvcache_manager = PackedKVCacheManager(self.page_pool)
-        self.resource_collector = ResourceCollector()
+        self.resource_collector = ResourceCollector(llama_3_70b_args)
+        print(f"Maximally serves {self.resource_collector.get_num_layer()} of Llam-3-70b")
         self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
 
         threading.Thread(target=self.llm_engine.run, daemon=True).start()

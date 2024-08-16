@@ -16,6 +16,7 @@ class ModelArgs:
     max_batch_size: int = 32
     max_seq_len: int = 2048
     page_size: int = 256
+    num_pages: int = 280
 
 
 llama_2_7b_args = ModelArgs(

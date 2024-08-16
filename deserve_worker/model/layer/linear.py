@@ -116,9 +116,9 @@ class FeedForward(torch.nn.Module):
         x: torch.Tensor,
         ctx: ForwardCtx,
     ) -> torch.Tensor:
-        w1 = F.silu(self.w1(x))
-        w3 = self.w3(x)
-        w2 = self.w2(w1 * w3)
+        w1 = F.silu(self.w1(x))  # [*, hidden_dim]
+        w3 = self.w3(x)  # [*, hidden_dim]
+        w2 = self.w2(w1 * w3)  # [*, dim]
         trace_op(ctx, self.component_id.with_op("w1"), w1)
         trace_op(ctx, self.component_id.with_op("w3"), w3)
         trace_op(ctx, self.component_id.with_op("w2"), w2)
