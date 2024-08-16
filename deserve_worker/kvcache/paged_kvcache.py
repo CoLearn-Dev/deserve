@@ -7,7 +7,7 @@ from flashinfer import (  # type: ignore
     BatchPrefillWithPagedKVCacheWrapper,
 )
 
-from deserve_worker.kvcache.page_pool import PagePool
+from deserve_worker.kvcache.page_pool import PagePool, calc_pages_needed_num
 
 from .kvcache import KVCache, KVCacheManager, main_device
 
@@ -18,10 +18,10 @@ class PagedKVCacheManager(KVCacheManager):
         page_pool: PagePool,
     ):
         self.page_pool = page_pool
-        self.block_size = page_pool.block_size
+        self.block_size = page_pool.page_size
 
     def alloc(self, total_len: int) -> Optional["PagedKVCache"]:
-        len_block = (total_len + self.block_size - 1) // self.page_pool.block_size
+        len_block = calc_pages_needed_num(total_len, self.block_size)
         blocks = self.page_pool.alloc(len_block)
         if blocks is None:
             return None
@@ -36,7 +36,7 @@ class PagedKVCacheManager(KVCacheManager):
     def renew(self, kvcache: KVCache, total_len: int) -> bool:
         kvcache = cast(PagedKVCache, kvcache)
         if total_len > kvcache.block_table.shape[1] * self.block_size:
-            len_block = (total_len + self.block_size - 1) // self.page_pool.block_size
+            len_block = calc_pages_needed_num(total_len, self.block_size)
             delta_block = len_block - kvcache.block_table.shape[1]
             blocks = self.page_pool.alloc(delta_block)
             if blocks is None:

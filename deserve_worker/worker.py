@@ -8,6 +8,10 @@ from typing import Any, Optional, cast
 import requests
 import torch
 
+from deserve_worker.engine.event.base import EngineEvent
+from deserve_worker.engine.event.exec import NewExecEvent
+
+from .engine.llm_engine import LLMEngine
 from .execution.exec import BatchDecode, BatchPrefill, SingleTrace
 from .execution.result import BatchAct, BatchUpdate, ExecResult, TraceResult
 from .kvcache.kvcache import KVCache, main_device, main_dtype
@@ -15,7 +19,6 @@ from .kvcache.packed_kvcache import PackedKVCacheManager
 from .kvcache.page_pool import PagePool
 from .kvcache.paged_kvcache import PagedKVCacheManager
 from .layer_storage import LayerManager
-from .llm_engine import LLMEngine
 from .model.args import llama_3_70b_args
 from .model.utils import dumps
 from .resource import ResourceCollector
@@ -35,15 +38,27 @@ class Worker:
         self.controller_url = controller_url
         self.task_datas: dict[str, TaskData] = {}
         self.relay_queue = queue.Queue[ExecResult]()
-        self.llm_engine = LLMEngine(max_total_bsz, 256, self.relay_queue)
+        self.event_queue = queue.Queue[
+            EngineEvent
+        ]()  # TODO: after we use async engine, we do not need this anymore
+        self.llm_engine = LLMEngine(
+            max_total_bsz, 256, self.event_queue, self.relay_queue
+        )
         self.layer_manager = LayerManager(main_device)
         self.page_pool = PagePool(
-            40, llama_3_70b_args.num_pages, llama_3_70b_args.page_size, main_device, main_dtype
+            40,
+            llama_3_70b_args.num_pages,
+            llama_3_70b_args.page_size,
+            self.event_queue,
+            main_device,
+            main_dtype,
         )
         self.paged_kvcache_manager = PagedKVCacheManager(self.page_pool)
         self.packed_kvcache_manager = PackedKVCacheManager(self.page_pool)
         self.resource_collector = ResourceCollector(llama_3_70b_args)
-        print(f"Maximally serves {self.resource_collector.get_num_layer()} of Llam-3-70b")
+        print(
+            f"Maximally serves {self.resource_collector.get_num_layer()} layers of Llam-3-70b"
+        )
         self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
 
         threading.Thread(target=self.llm_engine.run, daemon=True).start()
@@ -121,7 +136,7 @@ class Worker:
                 page_pool=self.page_pool,
                 task_datas=task_datas,
             )
-            self.llm_engine.add_request(prefill)
+            self.llm_engine.add_event(NewExecEvent(prefill))
         else:
             decode = BatchDecode(
                 xs=xs.to(main_device),
@@ -129,7 +144,7 @@ class Worker:
                 page_pool=self.page_pool,
                 task_datas=task_datas,
             )
-            self.llm_engine.add_request(decode)
+            self.llm_engine.add_event(NewExecEvent(decode))
 
     def forward(
         self,
@@ -164,7 +179,7 @@ class Worker:
                 page_pool=self.page_pool,
                 task_datas=[task_data],
             )
-            self.llm_engine.add_request(prefill)
+            self.llm_engine.add_event(NewExecEvent(prefill))
         else:
             decode = BatchDecode(
                 xs=x.to(main_device),
@@ -172,7 +187,7 @@ class Worker:
                 page_pool=self.page_pool,
                 task_datas=[task_data],
             )
-            self.llm_engine.add_request(decode)
+            self.llm_engine.add_event(NewExecEvent(decode))
 
     def trace(
         self,
@@ -208,7 +223,7 @@ class Worker:
             page_pool=self.page_pool,
             traces={},
         )
-        self.llm_engine.add_request(trace)
+        self.llm_engine.add_event(NewExecEvent(trace))
 
     def relay(self) -> None:
         q = self.relay_queue

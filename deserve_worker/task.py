@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
+from deserve_worker.kvcache.page_pool import calc_pages_needed_num
+
 from .kvcache.kvcache import KVCache
 
 
@@ -50,6 +52,11 @@ class TaskData:
             seqlen=self.seqlen,
             sampling_params=self.sampling_params,
         )
+
+    def get_extended_pages_num(self, page_size: int) -> int:
+        previous = calc_pages_needed_num(self.start_pos, page_size)
+        now = calc_pages_needed_num(self.start_pos + self.seqlen, page_size)
+        return now - previous
 
 
 @dataclass

@@ -216,10 +216,10 @@ class Attention(torch.nn.Module):
             # remember consecutive block table [bsz, len] corresponds to memory [bsz, len * block_size, 8, 128]
             begin, end = ctx.ranges[i]
             cache_k = pages_k[begin : end + 1].view(
-                1, (end - begin + 1) * ctx.page_pool.block_size, 8, 128
+                1, (end - begin + 1) * ctx.page_pool.page_size, 8, 128
             )
             cache_v = pages_v[begin : end + 1].view(
-                1, (end - begin + 1) * ctx.page_pool.block_size, 8, 128
+                1, (end - begin + 1) * ctx.page_pool.page_size, 8, 128
             )
 
             freqs_cis = ctx.global_freqs_cis[start_pos : start_pos + seqlen]

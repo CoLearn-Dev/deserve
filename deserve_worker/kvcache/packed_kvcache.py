@@ -16,7 +16,7 @@ def del_tensor(t: torch.Tensor) -> None:
 class PackedKVCacheManager(KVCacheManager):
     def __init__(self, page_pool: PagePool):
         self.page_pool = page_pool
-        self.block_size = page_pool.block_size
+        self.block_size = page_pool.page_size
 
     def get_kv_cache_length(self, cur: int, seqlen: int) -> int:
         while cur < seqlen:
@@ -24,7 +24,7 @@ class PackedKVCacheManager(KVCacheManager):
         return cur
 
     def alloc(self, total_len: int) -> Optional[KVCache]:
-        len_block = (total_len + self.block_size - 1) // self.page_pool.block_size
+        len_block = (total_len + self.block_size - 1) // self.page_pool.page_size
         blocks = self.page_pool.alloc(len_block)
         # the consecutive block table is in shape of [bsz, len_block], which corresponds to [bsz, len_block * block_size, 8, 128] in memory
         if blocks is None:
@@ -41,8 +41,8 @@ class PackedKVCacheManager(KVCacheManager):
 
     def renew(self, kvcache: KVCache, total_len: int) -> bool:
         kvcache = cast(PackedKVCache, kvcache)
-        if total_len > kvcache.csct_block_table.shape[1] * self.page_pool.block_size:
-            len_block = (total_len + self.block_size - 1) // self.page_pool.block_size
+        if total_len > kvcache.csct_block_table.shape[1] * self.page_pool.page_size:
+            len_block = (total_len + self.block_size - 1) // self.page_pool.page_size
             blocks = self.page_pool.alloc(len_block)
             if blocks is None:
                 return False
