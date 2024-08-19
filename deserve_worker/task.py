@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from deserve_worker.kvcache.page_pool import calc_pages_needed_num
 
-from .kvcache.kvcache import KVCache
+from .kvcache.kvcache import KVCache, PersistentKVCache
 
 
 class PlanStep(BaseModel):
@@ -39,7 +39,7 @@ class TaskData:
     round: int
     seqlen: int
     sampling_params: SamplingParams
-    kvcache: KVCache
+    kvcache: KVCache | PersistentKVCache
     """
     When flash attention is enabled, we use paged attention, otherwise the standard attention is adopted.
     """
@@ -54,9 +54,18 @@ class TaskData:
         )
 
     def get_extended_pages_num(self, page_size: int) -> int:
-        previous = calc_pages_needed_num(self.start_pos, page_size)
-        now = calc_pages_needed_num(self.start_pos + self.seqlen, page_size)
-        return now - previous
+        if isinstance(self.kvcache, PersistentKVCache):
+            return calc_pages_needed_num(self.start_pos + self.seqlen, page_size)
+        else:
+            previous = calc_pages_needed_num(self.start_pos, page_size)
+            now = calc_pages_needed_num(self.start_pos + self.seqlen, page_size)
+            return now - previous
+
+    def get_prev_pages_num(self, page_size: int) -> int:
+        if isinstance(self.kvcache, PersistentKVCache):
+            return 0
+        else:
+            return calc_pages_needed_num(self.start_pos, page_size)
 
 
 @dataclass

@@ -126,6 +126,18 @@ async def cancel(request: CancelRequest) -> str:
     )
     return "ok"
 
+class PersistRequest(BaseModel): 
+    task_id: str
+    start_index: int
+    plan: list[PlanStep]
+
+@app.post("/persist")
+async def persist(request: PersistRequest) -> str:
+    runtime_executor.submit(
+        worker.persist, request.task_id, request.start_index, request.plan
+    )
+    return "ok"
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

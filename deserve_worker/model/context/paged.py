@@ -7,7 +7,7 @@ from flashinfer import (  # type: ignore
     BatchPrefillWithPagedKVCacheWrapper,
 )
 
-from deserve_worker.kvcache.kvcache import main_device
+from deserve_worker.kvcache.kvcache import PersistentKVCache, main_device
 from deserve_worker.kvcache.page_pool import PagePool
 from deserve_worker.kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManager
 from deserve_worker.model.args import ModelArgs
@@ -28,7 +28,14 @@ class PagedForwardCtx(ForwardCtx):
     ) -> "PagedForwardCtx":
         kv_last_page_lens = []
         for task_data, seqlen in zip(task_datas, seqlens):
-            kvcache = cast(PagedKVCache, task_data.kvcache)
+            if isinstance(task_data.kvcache, PersistentKVCache):
+                print(f"Reload {task_data.task_id} to GPU")
+                kvcache = task_data.kvcache.into_memory()
+                assert isinstance(kvcache, PagedKVCache)
+                task_data.kvcache = kvcache
+            else:
+                kvcache = cast(PagedKVCache, task_data.kvcache)
+
             total_len = task_data.start_pos + seqlen
             if not kvcache.renew(total_len):
                 raise RuntimeError("KV cache renew failed")

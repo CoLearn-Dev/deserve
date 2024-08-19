@@ -13,7 +13,13 @@ from deserve_worker.engine.event.exec import NewExecEvent
 
 from .engine.llm_engine import LLMEngine
 from .execution.exec import BatchDecode, BatchPrefill, SingleTrace
-from .execution.result import BatchAct, BatchUpdate, ExecResult, TraceResult
+from .execution.result import (
+    BatchAct,
+    BatchPersist,
+    BatchUpdate,
+    ExecResult,
+    TraceResult,
+)
 from .kvcache.kvcache import KVCache, main_device, main_dtype
 from .kvcache.packed_kvcache import PackedKVCacheManager
 from .kvcache.page_pool import PagePool
@@ -42,7 +48,11 @@ class Worker:
             EngineEvent
         ]()  # TODO: after we use async engine, we do not need this anymore
         self.llm_engine = LLMEngine(
-            max_total_bsz, 256, self.event_queue, self.relay_queue
+            max_total_bsz,
+            256,
+            self.event_queue,
+            self.relay_queue,
+            is_scheduler=worker_url.endswith("8080"),
         )
         self.layer_manager = LayerManager(main_device)
         self.page_pool = PagePool(
@@ -78,13 +88,11 @@ class Worker:
         When placeholder is placed, we should
         """
         if task_info.round == 0 and task_info.task_id not in self.task_datas:
+            kvcache: KVCache
             if is_trace:
-                kvcache = self.packed_kvcache_manager.alloc(task_info.seqlen)
+                kvcache = self.packed_kvcache_manager.new()
             else:
-                kvcache = self.paged_kvcache_manager.alloc(task_info.seqlen)
-            assert (
-                kvcache is not None
-            )  # TODO: if it is none, we should have a something like "resource manager" to handle this
+                kvcache = self.paged_kvcache_manager.new()
             task_data = TaskData(
                 task_id=task_info.task_id,
                 start_pos=0,
@@ -295,6 +303,9 @@ class Worker:
                     f"{self.controller_url}/update_traces",
                     data=data,
                 )
+            elif isinstance(result, BatchPersist):
+                for task_data in result.task_datas:
+                    self.persist(task_data.task_id, None, task_data.plan)
 
     def cancel(
         self, task_id: str, start_index: Optional[int], plan: list[PlanStep]
@@ -307,16 +318,42 @@ class Worker:
         if start_index is None:
             start_index = index
 
-        task_info = self.task_datas.pop(task_id, None)
-        if task_info is not None:
-            task_info.kvcache.clear()
+        task_data = self.task_datas.pop(task_id, None)
+        if task_data is not None:
+            task_data.kvcache.clear()
         next_index = (index + 1) % len(plan)
         if next_index != start_index:
             requests.post(
                 f"{plan[next_index].worker_url}/cancel",
                 json={
                     "task_id": task_id,
-                    "start_index": index,
+                    "start_index": start_index,
+                    "plan": [step.model_dump() for step in plan],
+                },
+            )
+
+    def persist(
+        self, task_id: str, start_index: Optional[int], plan: list[PlanStep]
+    ) -> None:
+        index = next(
+            (i for i, x in enumerate(plan) if x.worker_id == self.worker_id), None
+        )
+        if index is None:
+            return
+        if start_index is None:
+            start_index = index
+        else:
+            # the first worker has already persist the data inside LLM engine
+            task_data = self.task_datas.get(task_id)
+            if task_data is not None and isinstance(task_data.kvcache, KVCache):
+                task_data.kvcache = task_data.kvcache.into_persistent()
+        next_index = (index + 1) % len(plan)
+        if next_index != start_index:
+            requests.post(
+                f"{plan[next_index].worker_url}/persist",
+                json={
+                    "task_id": task_id,
+                    "start_index": start_index,
                     "plan": [step.model_dump() for step in plan],
                 },
             )

@@ -24,6 +24,11 @@ class BatchUpdate(ExecResult):
 
 
 @dataclass
+class BatchPersist(ExecResult):
+    pass
+
+
+@dataclass
 class TraceResult(ExecResult):
     x: torch.Tensor
     trace: dict[OpId, torch.Tensor]

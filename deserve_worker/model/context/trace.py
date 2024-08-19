@@ -3,7 +3,7 @@ from typing import Optional, cast
 
 import torch
 
-from deserve_worker.kvcache.kvcache import main_device
+from deserve_worker.kvcache.kvcache import PersistentKVCache, main_device
 from deserve_worker.kvcache.packed_kvcache import PackedKVCache, PackedKVCacheManager
 from deserve_worker.kvcache.page_pool import PagePool
 from deserve_worker.model.context.forward import ForwardCtx
@@ -27,7 +27,14 @@ class TraceForwardCtx(ForwardCtx):
     ) -> "TraceForwardCtx":
         ranges = []
         for task_data, seqlen in zip(task_datas, seqlens):
-            task_data.kvcache.renew(task_data.start_pos + seqlen)
+            if isinstance(task_data.kvcache, PersistentKVCache):
+                print(f"Reload {task_data.task_id} to GPU")
+                kvcache = task_data.kvcache.into_memory()
+                assert isinstance(kvcache, PackedKVCache)
+                task_data.kvcache = kvcache
+            else:
+                kvcache = cast(PackedKVCache, task_data.kvcache)
+            kvcache.renew(task_data.start_pos + seqlen)
             kvcache = cast(PackedKVCache, task_data.kvcache)
             csct_block_table = kvcache.csct_block_table.flatten()
             begin = cast(int, csct_block_table[0].item())

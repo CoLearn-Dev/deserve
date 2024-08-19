@@ -1,10 +1,12 @@
 import queue
+import traceback
 from typing import Optional
 
 from deserve_worker.engine.event.exec import NewExecEvent
+from deserve_worker.kvcache.paged_kvcache import PagedKVCache
 
 from ..execution.exec import BatchDecode, BatchExec, BatchPrefill, SingleTrace
-from ..execution.result import ExecResult
+from ..execution.result import BatchPersist, ExecResult
 from .event.base import EngineEvent, MoreSpaceEvent
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
@@ -18,6 +20,7 @@ class LLMEngine:
         max_total_seqlen: int,
         receiver: queue.Queue[EngineEvent],
         sender: queue.Queue[ExecResult],
+        is_scheduler: bool,
     ):
         self.max_total_bsz = max_total_bsz
         self.max_total_seqlen = max_total_seqlen
@@ -27,6 +30,7 @@ class LLMEngine:
         self.decode_buffer: list[BatchDecode] = []
         self.trace_buffer: list[SingleTrace] = []
         self.pending_buffer: list[BatchExec] = []
+        self.is_scheduler = is_scheduler
 
     def run(self) -> None:
         while True:
@@ -59,15 +63,18 @@ class LLMEngine:
         elif isinstance(exec, SingleTrace):
             self.trace_buffer.append(exec)
         else:
-            raise NotImplementedError("Unknown request type")
+            raise NotImplementedError(f"Unknown request type {type(exec)}")
 
     def sort_event(self, event: EngineEvent) -> None:
         if isinstance(event, NewExecEvent):
             self.sort_exec(event.exec)
         elif isinstance(event, MoreSpaceEvent):
             while len(self.pending_buffer) > 0:
-                exec = self.pending_buffer.pop()
-                if exec.check_kvcache_available():
+                exec = self.pending_buffer[-1]
+                num_avails = exec.page_pool.num_avails
+                if exec.check_kvcache_available(num_avails):
+                    num_avails -= exec.get_extended_pages_num()
+                    self.pending_buffer.pop()
                     self.sort_exec(exec)
                 else:
                     break
@@ -106,6 +113,7 @@ class LLMEngine:
             return todo.step()
         else:
             self.pending_buffer.append(todo)
+            print("Pending prefill due to lack of KV cache, waiting for more space")
             return None
 
     def handle_decode(self, decodes: list[BatchDecode]) -> Optional[list[ExecResult]]:
@@ -117,11 +125,33 @@ class LLMEngine:
                 total_bsz += decodes[i].bsz()
                 todos.append(decodes.pop(i))
         todo = BatchDecode.merge(todos)
-        if todo.check_kvcache_available():
-            return todo.step()
+        if self.is_scheduler:
+            persists: list[BatchExec] = []
+            while not todo.check_kvcache_available():
+                pending = todo.pop()
+                pending.persist()
+                print(f"Offload {pending.task_datas[0].task_id} to CPU")
+                persists.append(pending)
+            results: list[ExecResult] = [
+                BatchPersist(
+                    [
+                        task_data
+                        for persist in persists
+                        for task_data in persist.task_datas
+                    ]
+                )
+            ]
+            self.pending_buffer.extend(persists)
+            if todo.bsz() > 0:
+                results.extend(todo.step())
+            return results
         else:
-            self.pending_buffer.append(todo)
-            return None
+            if todo.check_kvcache_available():
+                return todo.step()
+            else:
+                self.pending_buffer.append(todo)
+                print("Pending decode due to lack of KV cache, waiting for more space")
+                return None
 
     def handle_trace(self, traces: list[SingleTrace]) -> Optional[list[ExecResult]]:
         return traces.pop().step()  # TODO: deal with pending
