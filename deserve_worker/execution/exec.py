@@ -224,7 +224,6 @@ class BatchPrefill(BatchExec):
             prefill_ctx = PagedPrefillCtx.init_page_prefill_ctx(
                 self.page_pool,
                 self.task_datas,
-                self.seqlens(),
                 prefill_wrapper,
             )
             model_args = self.layer_storage.model_args

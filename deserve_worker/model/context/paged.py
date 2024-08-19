@@ -24,10 +24,10 @@ class PagedForwardCtx(ForwardCtx):
 
     @staticmethod
     def init_paged_forward_ctx(
-        page_pool: PagePool, task_datas: list[TaskData], seqlens: list[int]
+        page_pool: PagePool, task_datas: list[TaskData]
     ) -> "PagedForwardCtx":
         kv_last_page_lens = []
-        for task_data, seqlen in zip(task_datas, seqlens):
+        for task_data in task_datas:
             if isinstance(task_data.kvcache, PersistentKVCache):
                 print(f"Reload {task_data.task_id} to GPU")
                 kvcache = task_data.kvcache.into_memory()
@@ -36,7 +36,7 @@ class PagedForwardCtx(ForwardCtx):
             else:
                 kvcache = cast(PagedKVCache, task_data.kvcache)
 
-            total_len = task_data.start_pos + seqlen
+            total_len = task_data.start_pos + task_data.seqlen
             if not kvcache.renew(total_len):
                 raise RuntimeError("KV cache renew failed")
             kv_last_page_lens.append((total_len - 1) % kvcache.manager.block_size + 1)
@@ -46,6 +46,7 @@ class PagedForwardCtx(ForwardCtx):
         ]
 
         len_list = [0] + [kvcache.shape[0] for kvcache in kvcache_list]
+        seqlens = [task_data.seqlen for task_data in task_datas]
         kv_page_indices = torch.cat(kvcache_list).view(-1)
         kv_page_indptr = torch.tensor(
             len_list, dtype=torch.int32, device=main_device
@@ -84,10 +85,7 @@ class PagedDecodeCtx(PagedForwardCtx):
         task_datas: list[TaskData],
         wrapper: BatchDecodeWithPagedKVCacheWrapper,
     ) -> "PagedDecodeCtx":
-        seqlens = [1 for _ in task_datas]
-        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(
-            page_pool, task_datas, seqlens
-        )
+        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(page_pool, task_datas)
         return PagedDecodeCtx(
             page_pool=page_pool,
             offsets=forward_ctx.offsets,
@@ -110,12 +108,9 @@ class PagedPrefillCtx(PagedForwardCtx):
     def init_page_prefill_ctx(
         page_pool: PagePool,
         task_datas: list[TaskData],
-        seqlens: list[int],
         wrapper: BatchPrefillWithPagedKVCacheWrapper,
     ) -> "PagedPrefillCtx":
-        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(
-            page_pool, task_datas, seqlens
-        )
+        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(page_pool, task_datas)
         return PagedPrefillCtx(
             page_pool=page_pool,
             offsets=forward_ctx.offsets,
