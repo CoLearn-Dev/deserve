@@ -59,8 +59,10 @@ class PagePool:
             self.num_avails -= size
             if size > self.page_buffer.shape[0]:
                 fetch_size = max(self.fetch_size, size - self.page_buffer.shape[0])
-                block_avails = torch.nonzero(self.page_bitmap)[:fetch_size].to(
-                    torch.int32
+                block_avails = (
+                    torch.nonzero(self.page_bitmap)[:fetch_size]
+                    .to(torch.int32)
+                    .flatten()
                 )
                 self.page_bitmap[block_avails] = False
                 self.page_buffer = torch.cat([self.page_buffer, block_avails])
@@ -89,6 +91,13 @@ class PagePool:
             self.sender.put(MoreSpaceEvent())
             self.num_avails += blocks.shape[0]
             self.page_bitmap[blocks] = True
+
+    def retrieve(
+        self, indices: torch.Tensor
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        blocks_k = [page_k[indices] for page_k in self.pages_k]
+        blocks_v = [page_v[indices] for page_v in self.pages_v]
+        return blocks_k, blocks_v
 
     def get_pages_k(self, layer: int) -> torch.Tensor:
         return self.pages_k[layer]

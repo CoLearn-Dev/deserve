@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
 import torch
 from flashinfer import (  # type: ignore
@@ -13,7 +13,7 @@ from deserve_worker.execution.result import (
     ExecResult,
     TraceResult,
 )
-from deserve_worker.kvcache.kvcache import KVCacheManager, main_device
+from deserve_worker.kvcache.kvcache import KVCache, KVCacheManager, main_device
 from deserve_worker.kvcache.packed_kvcache import PackedKVCacheManager
 from deserve_worker.kvcache.page_pool import PagePool
 from deserve_worker.kvcache.paged_kvcache import PagedKVCacheManager
@@ -85,8 +85,18 @@ class BatchExec:
             ]
         )
 
-    def check_kvcache_available(self) -> bool:
-        return self.get_extended_pages_num() <= self.page_pool.num_pages
+    def get_prev_pages_num(self) -> int:
+        return sum(
+            [
+                task_data.get_prev_pages_num(self.page_pool.page_size)
+                for task_data in self.task_datas
+            ]
+        )
+
+    def check_kvcache_available(self, num_avails: Optional[int] = None) -> bool:
+        if num_avails is None:
+            num_avails = self.page_pool.num_avails
+        return self.get_extended_pages_num() <= num_avails
 
     @staticmethod
     def merge(execs: Sequence["BatchExec"]) -> "BatchExec":
@@ -110,6 +120,23 @@ class BatchExec:
             )
             start_pos += task_data.seqlen
         return execs
+
+    def pop(self) -> "BatchExec":
+        task_data = self.task_datas.pop()
+        seqlen = task_data.seqlen
+        result = BatchExec(
+            self.xs[-seqlen:],
+            self.layer_storage,
+            self.page_pool,
+            [task_data],
+        )
+        self.xs = self.xs[:-seqlen]
+        return result
+
+    def persist(self) -> None:
+        for task_data in self.task_datas:
+            if isinstance(task_data.kvcache, KVCache):
+                task_data.kvcache = task_data.kvcache.into_persistent()
 
     def post_process(self, result: torch.Tensor) -> list[ExecResult]:
         responses: list[ExecResult] = []
@@ -147,6 +174,12 @@ class BatchDecode(BatchExec):
             for result in results
         ]
 
+    def pop(self) -> "BatchDecode":
+        result = super().pop()
+        return BatchDecode(
+            result.xs, result.layer_storage, result.page_pool, result.task_datas
+        )
+
     def step(self) -> list[ExecResult]:
         with torch.inference_mode():
             decode_ctx = PagedDecodeCtx.init_paged_decode_ctx(
@@ -178,6 +211,12 @@ class BatchPrefill(BatchExec):
         exec = BatchExec.merge(prefills)
         return BatchPrefill(
             exec.xs, exec.layer_storage, exec.page_pool, exec.task_datas
+        )
+
+    def pop(self) -> "BatchPrefill":
+        result = super().pop()
+        return BatchPrefill(
+            result.xs, result.layer_storage, result.page_pool, result.task_datas
         )
 
     def step(self) -> list[ExecResult]:

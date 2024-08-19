@@ -3,14 +3,13 @@ from typing import Optional, cast
 
 import torch
 
-from deserve_worker.kvcache.kvcache import KVCache, KVCacheManager, main_device
+from deserve_worker.kvcache.kvcache import (
+    KVCache,
+    KVCacheManager,
+    PersistentKVCache,
+    main_device,
+)
 from deserve_worker.kvcache.page_pool import PagePool
-
-
-def del_tensor(t: torch.Tensor) -> None:
-    t.detach()
-    t.grad = None
-    t.untyped_storage().resize_(0)
 
 
 class PackedKVCacheManager(KVCacheManager):
@@ -23,14 +22,11 @@ class PackedKVCacheManager(KVCacheManager):
             cur += self.block_size
         return cur
 
-    def alloc(self, total_len: int) -> Optional[KVCache]:
-        len_block = (total_len + self.block_size - 1) // self.page_pool.page_size
-        blocks = self.page_pool.alloc(len_block)
+    def new(self) -> "PackedKVCache":
         # the consecutive block table is in shape of [bsz, len_block], which corresponds to [bsz, len_block * block_size, 8, 128] in memory
-        if blocks is None:
-            return None
-        else:
-            return PackedKVCache(blocks.view(1, -1), self)
+        return PackedKVCache(
+            torch.empty((0, 0), device=main_device, dtype=torch.int32), self
+        )
 
     def recycle(self, kvcache: KVCache) -> None:
         kvcache = cast(PackedKVCache, kvcache)
@@ -76,8 +72,18 @@ class PackedKVCacheManager(KVCacheManager):
 
                 self.page_pool.recycle(old_blocks)
                 kvcache.csct_block_table = blocks.view(1, -1)
-
         return True
+
+    def reinsert(self, kvcache: PersistentKVCache) -> Optional["PackedKVCache"]:
+        num_pages = kvcache.get_num_pages()
+        pages = self.page_pool.alloc_consecutive(num_pages)
+        if pages is None:
+            return None
+        else:
+            for i in range(len(kvcache.storage_k)):
+                self.page_pool.pages_k[i][pages] = kvcache.storage_k[i].to(main_device)
+                self.page_pool.pages_v[i][pages] = kvcache.storage_v[i].to(main_device)
+            return PackedKVCache(pages, self)
 
 
 class PackedKVCache(KVCache):
@@ -94,3 +100,13 @@ class PackedKVCache(KVCache):
 
     def clear(self) -> None:
         return self.manager.recycle(self)
+
+    def into_persistent(self) -> PersistentKVCache:
+        storage_k, storage_v = self.manager.page_pool.retrieve(
+            self.csct_block_table.flatten()
+        )
+        storage_k = [storage.cpu() for storage in storage_k]
+        storage_v = [storage.cpu() for storage in storage_v]
+        persistent = PersistentKVCache(storage_k, storage_v, self.manager)
+        self.clear()
+        return persistent
