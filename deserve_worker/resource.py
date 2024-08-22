@@ -1,18 +1,21 @@
 import os
+import sys
 
 import torch
 
+from deserve_worker.kvcache.kvcache import main_dtype
 from deserve_worker.model.args import ModelArgs
 
 
 class ResourceCollector:
     def __init__(self, model_args: ModelArgs) -> None:
         self.model_args = model_args
-
-        # for cpu
+        self.python_version = sys.version
+        self.pytorch_version = torch.__version__
+        self.cuda_version = torch.version.cuda
+        self.cpu_arch = os.uname().machine
         self.cpu_count = os.cpu_count()
-
-        # for gpu
+        self.precision = main_dtype
         _, self.gpu_mem = torch.cuda.mem_get_info()
 
     def calc_inner_dim(self) -> int:
@@ -59,3 +62,13 @@ class ResourceCollector:
         return (
             self.gpu_mem - self.temporary_count() * 2 - self.model_extra_count() * 2
         ) // ((self.kvcache_layer_count() + self.model_layer_count()) * 2)
+
+    def print_resources(self) -> None:
+        print("Python version:", self.python_version)
+        print("PyTorch version:", self.pytorch_version)
+        print("CUDA version:", self.cuda_version)
+        print("CPU architecture:", self.cpu_arch)
+        print("CPU count:", self.cpu_count)
+        print(f"GPU memory: {self.gpu_mem / 1024 / 1024 / 1024:.2f} GB")
+        print("Precision:", self.precision)
+        print("Maximum number of layers served for Llama-3-70b:", self.get_num_layer())
