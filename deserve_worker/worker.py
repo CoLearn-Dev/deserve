@@ -66,9 +66,7 @@ class Worker:
         self.paged_kvcache_manager = PagedKVCacheManager(self.page_pool)
         self.packed_kvcache_manager = PackedKVCacheManager(self.page_pool)
         self.resource_collector = ResourceCollector(llama_3_70b_args)
-        print(
-            f"Maximally serves {self.resource_collector.get_num_layer()} layers of Llam-3-70b"
-        )
+        self.resource_collector.print_resources()
         self.network_executor = ThreadPoolExecutor(max_workers=max_total_bsz)
 
         threading.Thread(target=self.llm_engine.run, daemon=True).start()
