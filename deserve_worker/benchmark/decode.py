@@ -1,8 +1,10 @@
 import argparse
 import sys
+import threading
 import time
 
 import torch
+from torch.profiler import ProfilerActivity, profile, record_function
 
 from deserve_worker.benchmark.utils import convert_name_to_id, layers
 from deserve_worker.execution.exec import BatchDecode, BatchPrefill
@@ -10,24 +12,11 @@ from deserve_worker.model.args import llama_3_70b_args
 from deserve_worker.task import SamplingParams, TaskData, TaskInfo
 from deserve_worker.worker import Worker
 
-if __name__ == "__main__":
-    sparam = SamplingParams(temperature=0.0, top_p=1.0)
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--begin", type=str)
-    parser.add_argument("--end", type=str)
-    parser.add_argument("--prefix", type=int)
-    parser.add_argument("--bsz", type=int)
-    args = parser.parse_args()
-    begin = convert_name_to_id(args.begin)
-    end = convert_name_to_id(args.end)
-    prefix = args.prefix
-    bsz = args.bsz
 
-    worker = Worker("test", "test", 48, "test")
+def profile_decode(
+    worker: Worker, begin: int, end: int, bsz: int, prefix: int
+) -> float:
     layer_storage = worker.layer_manager.get_layer_storage(layers[begin:end])
-    if prefix * bsz >= 2048 * 48:
-        print("skip")
-        exit(0)
     if begin == 0:
         prefill_input = torch.randint(
             1,
@@ -83,6 +72,26 @@ if __name__ == "__main__":
         time_end = time.time()
         if i >= 20:
             times.append((time_end - time_begin) * 1000)
-    print(f"Decode time: {sum(times) / len(times)} ms")
     for data in task_datas:
         data.kvcache.clear()
+    return sum(times) / len(times)
+
+
+if __name__ == "__main__":
+    sparam = SamplingParams(temperature=0.0, top_p=1.0)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--begin", type=str)
+    parser.add_argument("--end", type=str)
+    parser.add_argument("--prefix", type=int)
+    parser.add_argument("--bsz", type=int)
+    args = parser.parse_args()
+    begin = convert_name_to_id(args.begin)
+    end = convert_name_to_id(args.end)
+    prefix = args.prefix
+    bsz = args.bsz
+
+    worker = Worker("test", "test", 48, "test")
+    layer_storage = worker.layer_manager.get_layer_storage(layers[begin:end])
+    print(
+        f"Decode time: {profile_decode(worker, begin, end, bsz, prefix)} ms",
+    )
