@@ -3,8 +3,8 @@ import sys
 
 import torch
 
-from deserve_worker.kvcache.kvcache import main_dtype
 from deserve_worker.model.args import ModelArgs
+from deserve_worker.task import TaskData, main_dtype
 
 
 class ResourceCollector:

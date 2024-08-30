@@ -15,7 +15,13 @@ def dumps(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> bytes:
     """
 
     metadata_bytes = pickle.dumps(metadata)
-    tensors_bytes = save(tensors)
+    sharp_tensors = {}
+    for k, v in tensors.items():
+        if v.numel() == 0:
+            sharp_tensors[f"#{k}"] = torch.ones((1,), dtype=v.dtype)
+        else:
+            sharp_tensors[k] = v
+    tensors_bytes = save(sharp_tensors)
     return (
         len(metadata_bytes).to_bytes(4, byteorder="big")
         + metadata_bytes
@@ -30,7 +36,13 @@ def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
 
     metadata_length = int.from_bytes(b[:4], byteorder="big")
     metadata = pickle.loads(b[4 : 4 + metadata_length])
-    tensors = load(b[4 + metadata_length :])
+    sharp_tensors = load(b[4 + metadata_length :])
+    tensors = {}
+    for k, v in sharp_tensors.items():
+        if k.startswith("#"):
+            tensors[k[1:]] = torch.empty((0,), dtype=v.dtype)
+        else:
+            tensors[k] = v
     return tensors, metadata
 
 

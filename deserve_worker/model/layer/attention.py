@@ -171,9 +171,7 @@ class Attention(torch.nn.Module):
             interleave=True,
             rope_theta=500000,
         )
-        pages = ctx.page_pool.get_pages_k(ctx.layer_id), ctx.page_pool.get_pages_v(
-            ctx.layer_id
-        )
+        pages = ctx.page_pool.get_layered_pages(ctx.layer_id)
         append_paged_kv_cache(
             xk,
             xv,
@@ -203,8 +201,9 @@ class Attention(torch.nn.Module):
     ) -> torch.Tensor:
         seqlen = xqs.shape[1]
         output_list = []
-        pages_k = ctx.page_pool.get_pages_k(ctx.layer_id)
-        pages_v = ctx.page_pool.get_pages_v(ctx.layer_id)
+        pages = ctx.page_pool.get_layered_pages(ctx.layer_id)
+        pages_k = pages[:, 0, :, :, :].flatten(0, 1)
+        pages_v = pages[:, 1, :, :, :].flatten(0, 1)
         for i, start_pos in enumerate(ctx.offsets):
             xq = xqs[i].view(1, seqlen, self.n_local_heads, self.head_dim)
             xk = xks[i].view(1, seqlen, self.n_local_kv_heads, self.head_dim)

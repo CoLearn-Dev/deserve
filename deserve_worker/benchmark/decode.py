@@ -7,16 +7,22 @@ import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from deserve_worker.benchmark.utils import convert_name_to_id, layers
+from deserve_worker.engine.processor import Processor
 from deserve_worker.execution.exec import BatchDecode, BatchPrefill
+from deserve_worker.kvcache.paged.kvcache import PagedKVCache
+from deserve_worker.kvcache.paged.page_pool import GpuPagePool
+from deserve_worker.layer_storage import LayerManager, LayerStorage
 from deserve_worker.model.args import llama_3_70b_args
-from deserve_worker.task import SamplingParams, TaskData, TaskInfo
-from deserve_worker.worker import Worker
+from deserve_worker.task import SamplingParams, TaskData
 
 
 def profile_decode(
-    worker: Worker, begin: int, end: int, bsz: int, prefix: int
+    layer_storage: LayerStorage,
+    gpu_page_pool: GpuPagePool,
+    begin: int,
+    bsz: int,
+    prefix: int,
 ) -> float:
-    layer_storage = worker.layer_manager.get_layer_storage(layers[begin:end])
     if begin == 0:
         prefill_input = torch.randint(
             1,
@@ -46,34 +52,32 @@ def profile_decode(
             device=torch.device("cuda"),
         )
     task_datas: list[TaskData] = []
+    kvcaches: list[PagedKVCache[GpuPagePool]] = []
     for i in range(bsz):
-        data = worker.init_task_data(
-            TaskInfo(
-                task_id=f"{prefix}-{bsz}-{i}",
-                plan=[],
-                round=0,
-                seqlen=prefix,
-                sampling_params=sparam,
-            ),
-            False,
+        task_data = TaskData.empty(
+            task_id=f"{prefix}-{bsz}-{i}",
+            seqlen=prefix,
+            sampling_params=sparam,
         )
-        assert isinstance(data, TaskData)
-        task_datas.append(data)
-        prefill = BatchPrefill(prefill_input, layer_storage, worker.page_pool, [data])
+        task_datas.append(task_data)
+        kvcaches.append(PagedKVCache.empty(gpu_page_pool))
+        prefill = BatchPrefill(prefill_input, layer_storage, task_datas, kvcaches)
         prefill.step()
-        data.seqlen = 1
+        task_data.step()
     times = []
     for i in range(100):
         torch.cuda.synchronize()
         time_begin = time.time()
-        decode = BatchDecode(decode_input, layer_storage, worker.page_pool, task_datas)
+        decode = BatchDecode(decode_input, layer_storage, task_datas, kvcaches)
         decode.step()
+        for task_data in task_datas:
+            task_data.step()
         torch.cuda.synchronize()
         time_end = time.time()
         if i >= 20:
             times.append((time_end - time_begin) * 1000)
-    for data in task_datas:
-        data.kvcache.clear()
+    for kvcache in kvcaches:
+        kvcache.free()
     return sum(times) / len(times)
 
 
@@ -90,8 +94,12 @@ if __name__ == "__main__":
     prefix = args.prefix
     bsz = args.bsz
 
-    worker = Worker("test", "test", 48, "test")
-    layer_storage = worker.layer_manager.get_layer_storage(layers[begin:end])
+    layer_manager = LayerManager(torch.device("cuda"))
+    layer_storage = layer_manager.get_layer_storage(layers[begin:end])
+    num_layers = sum(layer.count(".") for layer in layers[begin:end])
+    gpu_page_pool = GpuPagePool(
+        num_layers, 9000, 8, torch.device("cuda"), torch.float16
+    )
     print(
-        f"Decode time: {profile_decode(worker, begin, end, bsz, prefix)} ms",
+        f"Decode time: {profile_decode(layer_storage, gpu_page_pool, begin, bsz, prefix)} ms",
     )

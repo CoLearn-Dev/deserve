@@ -295,7 +295,7 @@ def trace(request: TraceRequest) -> Response:
 
 class UpdateTaskRequest(BaseModel):
     task_id: str
-    output_tokens: list[int]  # [bsz, seqlen], in normal case, bsz=1 and seqlen=1
+    output_tokens: list[int]  # [seqlen], in normal case, seqlen=1
 
 
 @app.post("/update_tasks")
