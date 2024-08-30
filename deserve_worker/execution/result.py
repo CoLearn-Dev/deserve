@@ -2,33 +2,11 @@ from dataclasses import dataclass
 
 import torch
 
-from deserve_worker.task import TaskData
-from deserve_worker.trace import OpId
-
 
 @dataclass
-class ExecResult:
-    task_datas: list[TaskData]
-    pass
-
-
-@dataclass
-class BatchAct(ExecResult):
-    xs: torch.Tensor
-
-
-@dataclass
-class BatchUpdate(ExecResult):
-    tokens: list[torch.Tensor]
-    cancel_datas: list[TaskData]
-
-
-@dataclass
-class BatchPersist(ExecResult):
-    pass
-
-
-@dataclass
-class TraceResult(ExecResult):
-    x: torch.Tensor
-    trace: dict[OpId, torch.Tensor]
+class BatchResult:
+    ongoing_xs: torch.Tensor
+    ongoing_task_ids: list[str]
+    all_xs: torch.Tensor
+    all_task_ids: list[str]
+    done_task_ids: list[str]

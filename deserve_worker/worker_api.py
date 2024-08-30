@@ -1,9 +1,6 @@
 import argparse
 import threading
-import time
 import traceback
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import torch
@@ -11,146 +8,134 @@ import uvicorn
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
+from deserve_worker.engine.processor import Processor
+from deserve_worker.engine.scheduler import Scheduler
+from deserve_worker.request import DecodeRequest, JoinRequest, PrefillRequest
+from deserve_worker.task import SamplingParams, main_device
+
 from .model.utils import loads
-from .task import PlanStep, SamplingParams, TaskInfo
-from .worker import Worker
 
+llama3_70b_layers = [
+    "llama-3-70b-instruct-slice/tok_embeddings",
+    *[f"llama-3-70b-instruct-slice/layers.{i}" for i in range(0, 80)],
+    "llama-3-70b-instruct-slice/norm",
+    "llama-3-70b-instruct-slice/output",
+]
+llama3_8b_layers = [
+    "llama-3-8b-instruct-slice/tok_embeddings",
+    *[f"llama-3-8b-instruct-slice/layers.{i}" for i in range(0, 32)],
+    "llama-3-8b-instruct-slice/norm",
+    "llama-3-8b-instruct-slice/output",
+]
 app = FastAPI()
-worker: Worker
-runtime_executor = ThreadPoolExecutor(max_workers=96)
-
-pending_tasks = deque[tuple[dict[str, torch.Tensor], dict[str, Any]]]()
-mutex = (
-    threading.Lock()
-)  # may not be necessary if the async worker has only one thread?
-last_check_pending_time = 0.0
+llm_engine: Processor
 
 
-def check_pending() -> None:
-    with mutex:
-        print(
-            "check_pending",
-            len(pending_tasks),
-            worker.page_pool.num_avails,
-            worker.page_pool.num_pages,
+def convert_name_to_id(name: str, max_layer: int) -> int:
+    if name == "emb":
+        return 0
+    elif name.isdigit():
+        return int(name) + 1
+    elif name == "norm":
+        return max_layer - 1
+    elif name == "output":
+        return max_layer
+    else:
+        raise ValueError("Invalid layer name")
+
+
+@app.post("/prefill")
+async def prefill(request: Request) -> None:
+    body = await request.body()
+    tensors, metadata = loads(body)
+    task_id = metadata["task_id"]
+    sampling_params = SamplingParams.model_validate(metadata["sampling_params"])
+    llm_engine.add_request(
+        PrefillRequest(
+            x=tensors["x"].to(main_device),
+            task_id=task_id,
+            sampling_params=sampling_params,
         )
-        global last_check_pending_time
-        if last_check_pending_time + 1.0 > time.time():
-            return
-        last_check_pending_time = time.time()
-        num_avails = worker.page_pool.num_avails
-        while len(pending_tasks) > 0 and num_avails / worker.page_pool.num_pages >= 0.2:
-            tensors, metadata = pending_tasks.popleft()
-            num_avails -= tensors["x"].shape[0] // worker.page_pool.page_size + 1
-            runtime_executor.submit(
-                worker.forward,
-                tensors["x"],
-                metadata["task_id"],
-                metadata["round"],
-                [PlanStep.model_validate(step) for step in metadata["plan"]],
-                SamplingParams.model_validate(metadata["sampling_params"]),
-            )
-
-
-@app.post("/batch_forward")
-async def batch_forward(request: Request) -> str:
-    try:
-        body = await request.body()
-        tensors, metadata = loads(body)
-        # if worker.worker_id == metadata["task_infos"][0]["plan"][0]["worker_id"]:
-        #     check_pending()
-        runtime_executor.submit(
-            worker.batch_forward,
-            tensors["x"],
-            [
-                TaskInfo.model_validate(task_info)
-                for task_info in metadata["task_infos"]
-            ],
-        )
-    except Exception as e:
-        traceback.print_exc()
-    return "ok"
-
-
-@app.post("/forward")
-async def forward(request: Request) -> str:
-    try:
-        body = await request.body()
-        tensors, metadata = loads(body)
-        # if worker.worker_id == metadata["plan"][0]["worker_id"]:
-        #     check_pending()
-        #     if worker.page_pool.num_avails / worker.page_pool.num_pages < 0.2:
-        #         pending_tasks.append((tensors, metadata))
-        #         return "ok"
-        runtime_executor.submit(
-            worker.forward,
-            tensors["x"],
-            metadata["task_id"],
-            metadata["round"],
-            [PlanStep.model_validate(step) for step in metadata["plan"]],
-            SamplingParams.model_validate(metadata["sampling_params"]),
-        )
-    except Exception as e:
-        traceback.print_exc()
-    return "ok"
-
-
-@app.post("/trace")
-async def trace(request: Request) -> str:
-    try:
-        body = await request.body()
-        tensors, metadata = loads(body)
-        runtime_executor.submit(
-            worker.trace,
-            tensors["x"],
-            metadata["task_id"],
-            metadata["round"],
-            [PlanStep.model_validate(step) for step in metadata["plan"]],
-            SamplingParams.model_validate(metadata["sampling_params"]),
-        )
-    except Exception as e:
-        traceback.print_exc()
-    return "ok"
-
-
-class CancelRequest(BaseModel):
-    task_id: str
-    start_index: int
-    plan: list[PlanStep]
-
-
-@app.post("/cancel")
-async def cancel(request: CancelRequest) -> str:
-    runtime_executor.submit(
-        worker.cancel, request.task_id, request.start_index, request.plan
     )
-    return "ok"
 
-class PersistRequest(BaseModel): 
-    task_id: str
-    start_index: int
-    plan: list[PlanStep]
 
-@app.post("/persist")
-async def persist(request: PersistRequest) -> str:
-    runtime_executor.submit(
-        worker.persist, request.task_id, request.start_index, request.plan
+@app.post("/decode")
+async def decode(request: Request) -> None:
+    body = await request.body()
+    tensors, metadata = loads(body)
+    group_id = metadata["group_id"]
+    exec_task_ids = metadata["exec_task_ids"]
+    offload_task_ids = metadata["offload_task_ids"]
+    reload_task_ids = metadata["reload_task_ids"]
+    cancel_task_ids = metadata["cancel_task_ids"]
+    r2s_task_ids = metadata["r2s_task_ids"]
+    e2s_task_ids = metadata["e2s_task_ids"]
+    s2e_task_ids = metadata["s2e_task_ids"]
+    r2e_task_ids = metadata["r2e_task_ids"]
+    llm_engine.add_request(
+        DecodeRequest(
+            group_id=group_id,
+            xs=tensors["xs"].to(main_device),
+            exec_task_ids=exec_task_ids,
+            offload_task_ids=offload_task_ids,
+            reload_task_ids=reload_task_ids,
+            cancel_task_ids=cancel_task_ids,
+            r2s_task_ids=r2s_task_ids,
+            e2s_task_ids=e2s_task_ids,
+            s2e_task_ids=s2e_task_ids,
+            r2e_task_ids=r2e_task_ids,
+        )
     )
-    return "ok"
+
+
+@app.post("/join")
+async def join(request: Request) -> None:
+    body = await request.body()
+    tensors, metadata = loads(body)
+    task_id = metadata["task_id"]
+    llm_engine.add_request(JoinRequest(x=tensors["x"].to(main_device), task_id=task_id))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("id", type=str)
+    parser.add_argument("--model", type=str)
+    parser.add_argument("--num-rounds", type=int)
+    parser.add_argument("--layer-begin", type=str)
+    parser.add_argument("--layer-end", type=str)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--port", type=int)
     parser.add_argument("--controller-url", type=str)
+    parser.add_argument("--next-worker-url", type=str)
     args = parser.parse_args()
 
-    worker = Worker(
-        args.id,
-        f"http://localhost:{args.port}",
-        args.batch_size,
-        args.controller_url,
-    )
+    if args.model == "llama-3-70b":
+        layers = llama3_70b_layers
+    elif args.model == "llama-3-8b":
+        layers = llama3_8b_layers
+    else:
+        raise ValueError("Invalid model")
+    layer_begin = convert_name_to_id(args.layer_begin, len(layers))
+    layer_end = convert_name_to_id(args.layer_end, len(layers))
+    print(f"Serve from {layers[layer_begin]} to {layers[layer_end - 1]}")
+    if layer_begin == 0:
+        llm_engine = Scheduler(
+            args.num_rounds,
+            9000,
+            8,
+            args.batch_size,
+            layers[layer_begin:layer_end],
+            next_worker_url=args.next_worker_url,
+            controller_url=args.controller_url,
+        )
+    else:
+        llm_engine = Processor(
+            args.num_rounds,
+            9000,
+            8,
+            args.batch_size,
+            layers[layer_begin:layer_end],
+            next_worker_url=args.next_worker_url,
+            controller_url=args.controller_url,
+        )
+    threading.Thread(target=llm_engine.run, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=args.port)

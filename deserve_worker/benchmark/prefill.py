@@ -1,20 +1,24 @@
 import argparse
-import sys
 import time
 
 import torch
 
 from deserve_worker.benchmark.utils import convert_name_to_id, layers
 from deserve_worker.execution.exec import BatchPrefill
+from deserve_worker.kvcache.paged.kvcache import PagedKVCache
+from deserve_worker.kvcache.paged.page_pool import GpuPagePool
+from deserve_worker.layer_storage import LayerManager, LayerStorage
 from deserve_worker.model.args import llama_3_70b_args
-from deserve_worker.task import SamplingParams, TaskData, TaskInfo
-from deserve_worker.worker import Worker
+from deserve_worker.task import SamplingParams, TaskData
 
 
 def profile_prefill(
-    worker: Worker, begin: int, end: int, bsz: int, prefix: int
+    layer_storage: LayerStorage,
+    gpu_page_pool: GpuPagePool,
+    begin: int,
+    bsz: int,
+    prefix: int,
 ) -> float:
-    layer_storage = worker.layer_manager.get_layer_storage(layers[begin:end])
     times = []
     for i in range(20):
         if begin == 0:
@@ -33,27 +37,30 @@ def profile_prefill(
                 device=torch.device("cuda"),
             )
         task_datas: list[TaskData] = []
+        kvcaches: list[PagedKVCache[GpuPagePool]] = []
         for j in range(bsz):
-            data = worker.init_task_data(
-                TaskInfo(
-                    task_id=f"{prefix}-{bsz}-{i}-{j}",
-                    plan=[],
-                    round=0,
-                    seqlen=prefix,
-                    sampling_params=sparam,
-                ),
-                False,
+            task_data = TaskData(
+                task_id=f"{prefix}-{bsz}-{i}-{j}",
+                start_pos=0,
+                round=0,
+                seqlen=prefix,
+                sampling_params=sparam,
             )
-            assert isinstance(data, TaskData)
-            task_datas.append(data)
+            task_datas.append(task_data)
+            kvcaches.append(PagedKVCache.empty(gpu_page_pool))
         torch.cuda.synchronize()
         begin_time = time.time()
-        prefill = BatchPrefill(input, layer_storage, worker.page_pool, task_datas)
+        prefill = BatchPrefill(
+            input,
+            layer_storage,
+            task_datas,
+            kvcaches,
+        )
         prefill.step()
         torch.cuda.synchronize()
         end_time = time.time()
-        for data in task_datas:
-            data.kvcache.clear()
+        for kvcache in kvcaches:
+            kvcache.free()
         if i >= 5:
             times.append((end_time - begin_time) * 1000)
     return sum(times) / len(times)
@@ -72,5 +79,12 @@ if __name__ == "__main__":
     prefix = args.prefix
     bsz = args.bsz
 
-    worker = Worker("test", "test", 48, "test")
-    print(f"Prefill time: {profile_prefill(worker, begin, end, bsz, prefix)} ms")
+    layer_manager = LayerManager(torch.device("cuda"))
+    layer_storage = layer_manager.get_layer_storage(layers[begin:end])
+    num_layers = sum(layer.count(".") for layer in layers[begin:end])
+    gpu_page_pool = GpuPagePool(
+        num_layers, 9000, 8, torch.device("cuda"), torch.float16
+    )
+    print(
+        f"Prefill time: {profile_prefill(layer_storage, gpu_page_pool, begin, bsz, prefix)} ms"
+    )

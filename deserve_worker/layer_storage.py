@@ -207,11 +207,6 @@ class LayerStorage:
             seqlen = task_data.seqlen
             h = merged_h[ptr : ptr + seqlen]
             ptr += seqlen
-            task_data.start_pos += seqlen
-            task_data.round += 1
-            task_data.seqlen = (
-                1  # TODO: make more sense for updating task data values here
-            )
             sampling_params = task_data.sampling_params
             sampling_params.max_new_tokens -= 1
             if sampling_params.temperature > 0:

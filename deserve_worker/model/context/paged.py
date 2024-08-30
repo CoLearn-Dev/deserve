@@ -7,12 +7,11 @@ from flashinfer import (  # type: ignore
     BatchPrefillWithPagedKVCacheWrapper,
 )
 
-from deserve_worker.kvcache.kvcache import PersistentKVCache, main_device
-from deserve_worker.kvcache.page_pool import PagePool
-from deserve_worker.kvcache.paged_kvcache import PagedKVCache, PagedKVCacheManager
+from deserve_worker.kvcache.paged.kvcache import PagedKVCache
+from deserve_worker.kvcache.paged.page_pool import GpuPagePool
 from deserve_worker.model.args import ModelArgs
 from deserve_worker.model.context.forward import ForwardCtx
-from deserve_worker.task import TaskData
+from deserve_worker.task import TaskData, main_device
 
 
 @dataclass
@@ -24,26 +23,15 @@ class PagedForwardCtx(ForwardCtx):
 
     @staticmethod
     def init_paged_forward_ctx(
-        page_pool: PagePool, task_datas: list[TaskData]
+        task_datas: list[TaskData],
+        kvcaches: list[PagedKVCache[GpuPagePool]],
     ) -> "PagedForwardCtx":
         kv_last_page_lens = []
-        for task_data in task_datas:
-            if isinstance(task_data.kvcache, PersistentKVCache):
-                print(f"Reload {task_data.task_id} to GPU")
-                kvcache = task_data.kvcache.into_memory()
-                assert isinstance(kvcache, PagedKVCache)
-                task_data.kvcache = kvcache
-            else:
-                kvcache = cast(PagedKVCache, task_data.kvcache)
-
+        for task_data, kvcache in zip(task_datas, kvcaches):
             total_len = task_data.start_pos + task_data.seqlen
-            if not kvcache.renew(total_len):
-                raise RuntimeError("KV cache renew failed")
-            kv_last_page_lens.append((total_len - 1) % kvcache.manager.block_size + 1)
-        kvcache_list = [
-            cast(PagedKVCache, task_data.kvcache).block_table.view(-1)
-            for task_data in task_datas
-        ]
+            kvcache.extend(total_len)
+            kv_last_page_lens.append((total_len - 1) % kvcache.pool.page_size + 1)
+        kvcache_list = [kvcache.page_table for kvcache in kvcaches]
 
         len_list = [0] + [kvcache.shape[0] for kvcache in kvcache_list]
         seqlens = [task_data.seqlen for task_data in task_datas]
@@ -63,7 +51,7 @@ class PagedForwardCtx(ForwardCtx):
             dtype=torch.int32,
         )
         return PagedForwardCtx(
-            page_pool=page_pool,
+            page_pool=kvcaches[0].pool,
             offsets=offsets,
             bsz=len(task_datas),
             seqlens=torch.tensor(seqlens, dtype=torch.int32, device=main_device),
@@ -81,17 +69,17 @@ class PagedDecodeCtx(PagedForwardCtx):
 
     @staticmethod
     def init_paged_decode_ctx(
-        page_pool: PagePool,
         task_datas: list[TaskData],
+        kvcaches: list[PagedKVCache[GpuPagePool]],
         wrapper: BatchDecodeWithPagedKVCacheWrapper,
     ) -> "PagedDecodeCtx":
-        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(page_pool, task_datas)
+        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(task_datas, kvcaches)
         return PagedDecodeCtx(
-            page_pool=page_pool,
+            page_pool=forward_ctx.page_pool,
             offsets=forward_ctx.offsets,
             bsz=forward_ctx.bsz,
             seqlens=forward_ctx.seqlens,
-            layer_id=0,
+            layer_id=forward_ctx.layer_id,
             indptr=forward_ctx.indptr,
             kv_page_indices=forward_ctx.kv_page_indices,
             kv_page_indptr=forward_ctx.kv_page_indptr,
@@ -105,18 +93,18 @@ class PagedPrefillCtx(PagedForwardCtx):
     prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper
 
     @staticmethod
-    def init_page_prefill_ctx(
-        page_pool: PagePool,
+    def init_paged_prefill_ctx(
         task_datas: list[TaskData],
+        kvcaches: list[PagedKVCache[GpuPagePool]],
         wrapper: BatchPrefillWithPagedKVCacheWrapper,
     ) -> "PagedPrefillCtx":
-        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(page_pool, task_datas)
+        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(task_datas, kvcaches)
         return PagedPrefillCtx(
-            page_pool=page_pool,
+            page_pool=forward_ctx.page_pool,
             offsets=forward_ctx.offsets,
             bsz=forward_ctx.bsz,
             seqlens=forward_ctx.seqlens,
-            layer_id=0,
+            layer_id=forward_ctx.layer_id,
             indptr=forward_ctx.indptr,
             kv_page_indices=forward_ctx.kv_page_indices,
             kv_page_indptr=forward_ctx.kv_page_indptr,
