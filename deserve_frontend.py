@@ -192,7 +192,11 @@ def f_page_verify() -> None:
         with st.status("running..."):
             response = requests.post(
                 "http://localhost:19001/forward",
-                json=messages,
+                json={
+                    "messages": messages,
+                    "intermediate_dtype": "float16",
+                    "result_dtype": "float16",
+                },
             )
             token = response.json()
         st.write("Finished:")

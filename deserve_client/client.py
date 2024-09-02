@@ -89,12 +89,13 @@ def verify(
     traces = {OpId.from_str(k): v for k, v in tensors.items()}
     diffs: dict[OpId, float] = {}
     tokens = tokenizer(prompt, return_tensors="pt")["input_ids"].to(main_device)
-    transformer.check(tokens, CheckCtx(traces, diffs, main_device))
+    dtype = torch.float16
+    transformer.check(tokens, CheckCtx(dtype, dtype, traces, diffs, main_device))
     for op_id, diff in diffs.items():
         if diff > 0.03:
             print("Difference found for", op_id)
             if not transformer.verify(
-                tokens, VerifyCtx(op_id, 0.03, traces, main_device)
+                tokens, VerifyCtx(dtype, dtype, op_id, 0.03, traces, main_device)
             ):
                 print("Verification passed for", op_id)
             else:
