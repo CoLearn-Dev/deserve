@@ -6,7 +6,7 @@ from typing import Any, Mapping, Optional
 
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 from torch import nn
 from transformers import AutoTokenizer  # type: ignore
@@ -61,7 +61,13 @@ model2args = {
 
 
 @dataclass
-class CheckCtx:
+class ForwardCtx:
+    intermediate_dtype: torch.dtype
+    result_dtype: torch.dtype
+
+
+@dataclass
+class CheckCtx(ForwardCtx):
     traces: dict[OpId, torch.Tensor]
     diffs: dict[OpId, float]
     device: torch.device
@@ -75,7 +81,7 @@ class CheckCtx:
 
 
 @dataclass
-class VerifyCtx:
+class VerifyCtx(ForwardCtx):
     op_id: OpId
     threshold: float
     traces: dict[OpId, torch.Tensor]
@@ -90,7 +96,7 @@ class VerifyCtx:
 
 
 @dataclass
-class TraceCtx:
+class TraceCtx(ForwardCtx):
     traces: dict[OpId, torch.Tensor]
 
     def trace(self, op_id: OpId, x: torch.Tensor) -> None:
@@ -104,28 +110,30 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
+    def norm(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def verify(self, x: torch.Tensor, ctx: VerifyCtx) -> bool:
         op = ctx.op_id.op
         if op == "output":
-            return ctx.verify(self._norm(x.float()).type_as(x))
+            return ctx.verify(self.norm(x.float()).type_as(x))
         else:
             output = ctx.get_trace(self.component_id.with_op("weighted_output"))
             return ctx.verify(output * self.weight)
 
     def check(self, x: torch.Tensor, ctx: CheckCtx) -> torch.Tensor:
-        output = self._norm(x.float()).type_as(x)
+        output = self.norm(x.float()).type_as(x)
         output = ctx.check(self.component_id.with_op("output"), output)
         result = output * self.weight
         result = ctx.check(self.component_id.with_op("weighted_output"), result)
         return result
 
     def forward(self, x: torch.Tensor, ctx: TraceCtx) -> torch.Tensor:
-        output = self._norm(x.float()).type_as(x)
+        output = self.norm(x.to(ctx.intermediate_dtype)).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("output"), output)
-        result = output * self.weight
+        result = (
+            output.to(ctx.intermediate_dtype) * self.weight.to(ctx.intermediate_dtype)
+        ).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("weighted_output"), result)
         return result
 
@@ -328,13 +336,26 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
 
-        xq = self.wq(x).view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        x_inter = x.to(ctx.intermediate_dtype)
+        xq = (
+            self.wq(x_inter)
+            .view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            .to(ctx.result_dtype)
+        )
         ctx.trace(self.component_id.with_op("xq"), xq)
 
-        xk = self.wk(x).view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xk = (
+            self.wk(x_inter)
+            .view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            .to(ctx.result_dtype)
+        )
         ctx.trace(self.component_id.with_op("xk"), xk)
 
-        xv = self.wv(x).view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xv = (
+            self.wv(x_inter)
+            .view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            .to(ctx.result_dtype)
+        )
         ctx.trace(self.component_id.with_op("xv"), xv)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
@@ -357,19 +378,28 @@ class Attention(nn.Module):
         values = values.transpose(
             1, 2
         )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        scores = torch.matmul(
+            xq.to(ctx.intermediate_dtype),
+            keys.transpose(2, 3).to(ctx.intermediate_dtype),
+        ).to(ctx.result_dtype) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        scores = F.softmax(scores.to(ctx.intermediate_dtype), dim=-1).to(
+            ctx.result_dtype
+        )
 
         # check scores
         ctx.trace(self.component_id.with_op("scores"), scores)
 
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+        output = torch.matmul(
+            scores.to(ctx.intermediate_dtype), values.to(ctx.intermediate_dtype)
+        ).to(
+            ctx.result_dtype
+        )  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         ctx.trace(self.component_id.with_op("output"), output)
 
-        result = self.wo(output)
+        result = self.wo(output.to(ctx.intermediate_dtype)).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("weighted_output"), result)
         return result  # type: ignore
 
@@ -441,11 +471,13 @@ class FeedForward(nn.Module):
         ctx: TraceCtx,
     ) -> torch.Tensor:
         # check w1, w3, w2
-        w1 = F.silu(self.w1(x))
+        w1 = F.silu(self.w1(x.to(ctx.intermediate_dtype))).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("w1"), w1)
-        w3 = self.w3(x)
+        w3 = self.w3(x.to(ctx.intermediate_dtype)).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("w3"), w3)
-        w2 = self.w2(w1 * w3)
+        w2 = self.w2(w1.to(ctx.intermediate_dtype) * w3.to(ctx.intermediate_dtype)).to(
+            ctx.result_dtype
+        )
         ctx.trace(self.component_id.with_op("w2"), w2)
         return w2  # type: ignore
 
@@ -478,7 +510,7 @@ class TraceLinear(nn.Module):
 
     @torch.inference_mode()
     def forward(self, x: torch.Tensor, ctx: TraceCtx) -> torch.Tensor:
-        result = self.linear(x)
+        result = self.linear(x.to(ctx.intermediate_dtype)).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("output"), result)
         return result  # type: ignore
 
@@ -670,7 +702,11 @@ class Transformer(nn.Module):
         for layer_id in range(params.n_layers):
             layer = TransformerBlock(LayerId.from_str(f"{layer_id:02}"), params)
             layer.load_state_dict(
-                torch.load(cache_dir + f"layers.{layer_id}.pt", map_location="cpu")
+                torch.load(
+                    cache_dir + f"layers.{layer_id}.pt",
+                    map_location="cpu",
+                    weights_only=True,
+                )
             )
             layer.to(device)
             self.layers.append(layer)
@@ -813,7 +849,7 @@ class Transformer(nn.Module):
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 torch.set_default_dtype(torch.float16)  # type: ignore
 app = FastAPI()
-device = torch.device("cpu")
+device: torch.device
 
 
 @app.post("/check")
@@ -827,7 +863,8 @@ async def check(request: Request) -> dict[str, float]:
     tokens = tokens[:, : seqlen - 1]
     traces = {OpId.from_str(k): v.to(device) for k, v in tensors.items()}
     diffs: dict[OpId, float] = {}
-    model.check(tokens, CheckCtx(traces, diffs, device))
+    dtype = torch.float16
+    model.check(tokens, CheckCtx(dtype, dtype, traces, diffs, device))
     return {str(k): v for k, v in diffs.items()}
 
 
@@ -843,26 +880,92 @@ async def verify(request: Request) -> bool:
     _, seqlen = tokens.shape
     tokens = tokens[:, : seqlen - 1]
     traces = {OpId.from_str(k): v.to(device) for k, v in tensors.items()}
-    return model.verify(tokens, VerifyCtx(op_id, threshold, traces, device))
+    dtype = torch.float16
+    return model.verify(
+        tokens, VerifyCtx(dtype, dtype, op_id, threshold, traces, device)
+    )
+
+
+class ChatRequest(BaseModel):
+    messages: list[dict[str, str]]
+    intermediate_dtype: str
+    result_dtype: str
+
+
+def get_dtype(dtype_str: str) -> torch.dtype:
+    if dtype_str == "float16":
+        return torch.float16
+    elif dtype_str == "float32":
+        return torch.float32
+    elif dtype_str == "float64":
+        return torch.float64
+    else:
+        raise ValueError(f"Invalid dtype: {dtype_str}")
 
 
 @app.post("/forward")
-async def forward(messages: list[dict[str, str]]) -> str:
+async def forward(request: ChatRequest) -> str:
+    messages = request.messages
+    intermediate_dtype = request.intermediate_dtype
+    result_dtype = request.result_dtype
     tokens = tokenizer.apply_chat_template(messages, return_tensors="pt").to(device)
     _, seqlen = tokens.shape
     tokens = tokens[:, : seqlen - 1]
     traces: dict[OpId, torch.Tensor] = {}
-    tensor = model.forward(tokens, TraceCtx(traces))
+    tensor = model.forward(
+        tokens,
+        TraceCtx(
+            get_dtype(intermediate_dtype),
+            get_dtype(result_dtype),
+            traces,
+        ),
+    )
     next_token = torch.argmax(tensor[-1, -1], dim=-1).reshape(1)
     return tokenizer.decode(next_token)  # type: ignore
+
+
+@app.post("/trace")
+async def trace(request: ChatRequest) -> Response:
+    messages = request.messages
+    intermediate_dtype = request.intermediate_dtype
+    result_dtype = request.result_dtype
+    tokens = tokenizer.apply_chat_template(messages, return_tensors="pt").to(device)
+    _, seqlen = tokens.shape
+    tokens = tokens[:, : seqlen - 1]
+    traces: dict[OpId, torch.Tensor] = {}
+    tensor = model.forward(
+        tokens,
+        TraceCtx(
+            get_dtype(intermediate_dtype),
+            get_dtype(result_dtype),
+            traces,
+        ),
+    )
+    probs = torch.softmax(
+        tensor[-1, -1],
+        dim=-1,
+    )
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+
+    str_traces = {str(k): v.cpu() for k, v in traces.items()}
+    return Response(
+        content=dumps(
+            str_traces, {"probs": probs_sort.tolist(), "probs_idx": probs_idx.tolist()}
+        ),
+        media_type="application/octet-stream",
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--port", type=int, default=19001)
     args = parser.parse_args()
 
+    device = torch.device(args.device)
     model = Transformer(model2args[args.model], device)
+    port = args.port
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=19001)
+    uvicorn.run(app, host="0.0.0.0", port=port)
