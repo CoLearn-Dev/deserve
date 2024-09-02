@@ -1,5 +1,5 @@
 import pickle
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from safetensors.torch import load, save
@@ -46,15 +46,6 @@ def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     return tensors, metadata
 
 
-def trace_op(
-    ctx: ForwardCtx,
-    op_id: OpId,
-    output: torch.Tensor,
-    op_inputs: Optional[list[OpId]],
-) -> None:
+def trace_op(ctx: ForwardCtx, op_id: OpId, op_value: torch.Tensor) -> None:
     if isinstance(ctx, TraceForwardCtx):
-        if op_inputs is None:
-            op_inputs = [ctx.last_op_id]
-        ctx.traces[op_id] = output
-        ctx.output2input[op_id] = op_inputs
-        ctx.last_op_id = op_id
+        ctx.traces[op_id] = op_value

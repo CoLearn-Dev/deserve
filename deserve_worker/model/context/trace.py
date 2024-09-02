@@ -11,15 +11,26 @@ from deserve_worker.trace import OpId
 
 @dataclass
 class TraceForwardCtx(ForwardCtx):
-    ranges: list[tuple[int, int]]
     global_freqs_cis: torch.Tensor
     traces: dict[OpId, torch.Tensor]
+    output2input: dict[OpId, list[OpId]]
+    last_op_id: OpId
 
     @staticmethod
     def init_trace_forward_ctx(
         task_datas: list[TaskData],
-        kvcaches: list[PagedKVCache[CpuPagePool]],
         global_freqs_cis: torch.Tensor,
         traces: dict[OpId, torch.Tensor],
+        output2input: dict[OpId, list[OpId]],
     ) -> "TraceForwardCtx":
-        raise NotImplementedError
+        return TraceForwardCtx(
+            bsz=len(task_datas),
+            seqlens=torch.tensor(
+                [task.seqlen for task in task_datas], dtype=torch.int32
+            ),
+            layer_id=0,
+            global_freqs_cis=global_freqs_cis,
+            traces=traces,
+            output2input=output2input,
+            last_op_id=OpId(layer="tokens", component="main", op="input"),
+        )

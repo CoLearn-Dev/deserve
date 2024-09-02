@@ -9,7 +9,7 @@ import requests
 import torch
 
 from deserve_worker.engine.group import Group
-from deserve_worker.execution.exec import BatchPrefill
+from deserve_worker.execution.exec import BatchPrefill, SingleTrace
 from deserve_worker.kvcache.manager.portable import PortableKVCacheManager
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool, GpuPagePool
@@ -21,8 +21,10 @@ from deserve_worker.request import (
     JoinRequest,
     LLMRequest,
     PrefillRequest,
+    TraceRequest,
 )
 from deserve_worker.task import TaskData, TaskManager, main_device, main_dtype
+from deserve_worker.trace import OpId
 
 PINNED_MEMORY_SIZE = 512 * 1024 * 1024
 
@@ -35,6 +37,7 @@ class Processor:
         page_size: int,
         batch_size: int,
         layers: list[str],
+        worker_url: str,
         next_worker_url: str,
         controller_url: str,
     ) -> None:
@@ -70,6 +73,7 @@ class Processor:
             PINNED_MEMORY_SIZE // page_size // 2048 // self.num_layers
         )
         print("Offload max len:", self.limit_offload_len)
+        self.worker_url = worker_url
         self.next_worker_url = next_worker_url
         self.controller_url = controller_url
         self.network_executor = ThreadPoolExecutor(max_workers=64)
@@ -95,6 +99,8 @@ class Processor:
                     next_request = self.process_decode(request)
                 elif isinstance(request, JoinRequest):
                     self.process_join(request)
+                elif isinstance(request, TraceRequest):
+                    self.process_trace(request)
                 else:
                     raise ValueError(f"Unknown request type: {request}")
                 if next_request is not None:
@@ -112,6 +118,8 @@ class Processor:
             url = f"{self.next_worker_url}/decode"
         elif isinstance(request, JoinRequest):
             url = f"{self.next_worker_url}/join"
+        elif isinstance(request, TraceRequest):
+            url = f"{self.next_worker_url}/trace"
         else:
             raise ValueError(f"Unknown request type: {request}")
         tensors, metadata = request.into_safetensors()
@@ -124,6 +132,26 @@ class Processor:
             for task_id, token in zip(task_ids, tokens.tolist())
         ]
         self.network_executor.submit(requests.post, url, json=tosend)
+
+    def send_traces(
+        self,
+        traces: dict[OpId, torch.Tensor],
+        probs: list[tuple[int, float]],
+        output2input: dict[OpId, list[OpId]],
+        task_id: str,
+    ) -> None:
+        url = f"{self.controller_url}/update_traces"
+        str_output2input = {
+            str(op_id): [str(input_op_id) for input_op_id in input_op_ids]
+            for op_id, input_op_ids in output2input.items()
+        }
+        metadata = {
+            "task_id": task_id,
+            "output2input": str_output2input,
+            "probs": probs,
+        }
+        tensors = {str(op_id): tensor for op_id, tensor in traces.items()}
+        self.network_executor.submit(requests.post, url, data=dumps(tensors, metadata))
 
     def process_prefill(self, request: PrefillRequest) -> Optional[LLMRequest]:
         task_id = request.task_id
@@ -154,7 +182,6 @@ class Processor:
             return None
 
     def process_decode(self, request: DecodeRequest) -> LLMRequest:
-        # print(request)
         group = self.groups[request.group_id]
         prev_group = self.groups[
             (request.group_id - 1 + self.num_rounds) % self.num_rounds
@@ -197,10 +224,6 @@ class Processor:
 
         if len(request.exec_task_ids) > 0:
             result = group.exec(request.xs, request.exec_task_ids)
-            # print(
-            #     "page pool:",
-            #     self.gpu_page_pool.num_avails,
-            # )
             if self.layer_storage.need_sample:
                 self.send_tokens(result.all_xs, result.all_task_ids)
 
@@ -220,3 +243,43 @@ class Processor:
 
     def process_join(self, request: JoinRequest) -> None:
         raise NotImplementedError
+
+    def process_trace(self, request: TraceRequest) -> Optional[LLMRequest]:
+        traces: dict[OpId, torch.Tensor] = {}
+        output2input: dict[OpId, list[OpId]] = {}
+        trace = SingleTrace(
+            xs=request.x,
+            layer_storage=self.layer_storage,
+            task_datas=[
+                TaskData.empty(
+                    request.task_id,
+                    request.x.shape[0],
+                    request.sampling_params,
+                )
+            ],
+            traces=traces,
+            output2input=output2input,
+        )
+        result, probs = trace.step()
+        self.send_traces(traces, probs, output2input, request.task_id)
+        if self.layer_storage.need_sample:
+            self.send_tokens(result.all_xs, result.all_task_ids)
+            return None
+        else:
+            request.x = result.all_xs
+            return request
+
+    def heartbeat(self) -> None:
+        is_start = self.layer_storage.need_tokenize
+        while True:
+            url = f"{self.controller_url}/heartbeat"
+            self.network_executor.submit(
+                requests.post,
+                url,
+                json={
+                    "worker_url": self.worker_url,
+                    "is_start": is_start,
+                    "next_worker_url": self.next_worker_url,
+                },
+            )
+            time.sleep(1)

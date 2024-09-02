@@ -2,24 +2,23 @@ import argparse
 import logging
 import pickle
 import queue
-import time
-import traceback
 import uuid
 from typing import Any, Generator, Optional
 
 import requests
-import safetensors.torch
 import torch
 from cachetools import TTLCache
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from safetensors.torch import load, save
 from transformers import AutoTokenizer  # type: ignore
 
 controller_url: str
 app = FastAPI()
 logger = logging.getLogger("uvicorn")
-workers: TTLCache[str, str] = TTLCache(maxsize=128, ttl=2)
+next_workers: TTLCache[str, str] = TTLCache(maxsize=128, ttl=2)
+leaders: TTLCache[str, str] = TTLCache(maxsize=128, ttl=2)
 model2layers = {
     "meta-llama/Meta-Llama-3-70B-Instruct": 80,
     "meta-llama/Meta-Llama-3-8B-Instruct": 32,
@@ -43,7 +42,13 @@ def dumps(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> bytes:
     """
 
     metadata_bytes = pickle.dumps(metadata)
-    tensors_bytes = safetensors.torch.save(tensors)
+    sharp_tensors = {}
+    for k, v in tensors.items():
+        if v.numel() == 0:
+            sharp_tensors[f"#{k}"] = torch.ones((1,), dtype=v.dtype)
+        else:
+            sharp_tensors[k] = v
+    tensors_bytes = save(sharp_tensors)
     return (
         len(metadata_bytes).to_bytes(4, byteorder="big")
         + metadata_bytes
@@ -58,68 +63,35 @@ def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
 
     metadata_length = int.from_bytes(b[:4], byteorder="big")
     metadata = pickle.loads(b[4 : 4 + metadata_length])
-    tensors = safetensors.torch.load(b[4 + metadata_length :])
+    sharp_tensors = load(b[4 + metadata_length :])
+    tensors = {}
+    for k, v in sharp_tensors.items():
+        if k.startswith("#"):
+            tensors[k[1:]] = torch.empty((0,), dtype=v.dtype)
+        else:
+            tensors[k] = v
     return tensors, metadata
 
 
-class RegisterRequest(BaseModel):
-    worker_id: str
-    worker_url: str
-
-
-@app.post("/register")
-def register(request: RegisterRequest) -> str:
-    workers[request.worker_id] = request.worker_url
-    return "ok"
-
-
 class HeartbeatRequest(BaseModel):
-    worker_id: str
     worker_url: str
+    is_start: bool
+    next_worker_url: str
 
 
 @app.post("/heartbeat")
 def heartbeat(request: HeartbeatRequest) -> str:
-    workers[request.worker_id] = request.worker_url
+    if request.is_start:
+        leaders[request.worker_url] = request.next_worker_url
+    else:
+        next_workers[request.worker_url] = request.next_worker_url
     return "ok"
-
-
-class CompleteRequest:
-    pass  # discuss about implementation details (how to send, how to retrieve)
 
 
 class PlanStep(BaseModel):
     worker_id: str
     worker_url: str
     layers: list[str]
-
-
-def generate_plan(model: str, worker_ids: list[str]) -> list[PlanStep]:
-    worker_ids.sort()
-    alias = model2alias[model]
-    num_layer_total = model2layers[model]
-    num_layer_worker = num_layer_total // len(worker_ids)
-    layers = [
-        (i * num_layer_worker, (i + 1) * num_layer_worker)
-        for i in range(len(worker_ids) - 1)
-    ]
-    if len(layers) == 0:
-        layers.append((0, num_layer_total))
-    else:
-        layers.append((layers[-1][1], num_layer_total))
-    plans: list[PlanStep] = []
-    for worker_id, layer in zip(worker_ids, layers):
-        plans.append(
-            PlanStep(
-                worker_id=worker_id,
-                worker_url=workers[worker_id],
-                layers=[f"{alias}/layers.{i}" for i in range(layer[0], layer[1])],
-            )
-        )
-    plans[0].layers.insert(0, f"{alias}/tok_embeddings")
-    plans[-1].layers.append(f"{alias}/norm")
-    plans[-1].layers.append(f"{alias}/output")
-    return plans
 
 
 def relay_tokens(
@@ -132,13 +104,13 @@ def relay_tokens(
         yield value.encode("utf-8")
 
 
-class OnlineCompleteRequest(BaseModel):
+class CompleteRequest(BaseModel):
     model: str
     prompt: str
 
 
 @app.post("/complete")
-def complete(request: OnlineCompleteRequest) -> StreamingResponse:
+def complete(request: CompleteRequest) -> StreamingResponse:
     model = request.model
     prompt = request.prompt
 
@@ -153,17 +125,14 @@ def complete(request: OnlineCompleteRequest) -> StreamingResponse:
 
     # generate request
     tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-    plan = generate_plan(model, list(workers.keys()))
     tensors = {"x": tokens}
     metadata = {
         "task_id": task_id,
-        "round": 0,
-        "plan": plan,
         "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
     }
-    first_worker_url = plan[0].worker_url
+    first_worker_url = list(leaders.keys())[0]
     response = requests.post(
-        f"{first_worker_url}/forward", data=dumps(tensors, metadata)
+        f"{first_worker_url}/prefill", data=dumps(tensors, metadata)
     )
     if response.status_code != 200:
         raise HTTPException(status_code=500, detail="Worker error")
@@ -171,72 +140,46 @@ def complete(request: OnlineCompleteRequest) -> StreamingResponse:
     return StreamingResponse(relay_tokens(token_channel))
 
 
-class DryRunRequest(BaseModel):
+class ChatRequest(BaseModel):
     model: str
-    bsz: int
-    prefill_len: int
-    decode_len: int
+    messages: list[dict[str, str]]
 
 
-@app.post("/dryrun")
-def dry_run(request: DryRunRequest) -> float:
+@app.post("/chat")
+def chat(request: ChatRequest) -> StreamingResponse:
     model = request.model
-    prompt = "A"
+    messages = request.messages
 
     if model not in model2layers:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # init channel for relay
-    task_ids = []
-    task_infos = []
-    sampling_params = {
-        "temperature": 0.0,
-        "top_p": 1.0,
-        "max_new_tokens": request.decode_len,
-    }
-    plan = generate_plan(model, list(workers.keys()))
-    for _ in range(request.bsz):
-        task_id = str(uuid.uuid4())
-        token_channel = queue.Queue[Optional[str]]()
-        token_channels[task_id] = token_channel
-        task_ids.append(task_id)
-        task_infos.append(
-            {
-                "task_id": task_id,
-                "plan": plan,
-                "round": 0,
-                "seqlen": 1,
-                "sampling_params": sampling_params,
-            }
-        )
+    task_id = str(uuid.uuid4())
 
-    begin = time.time()
+    # init channel for relay
+    token_channel = queue.Queue[Optional[str]]()
+    token_channels[task_id] = token_channel
 
     # generate request
-    token: torch.Tensor = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-    token = token.repeat(request.prefill_len)
-    tokens = torch.cat([token for _ in range(request.bsz)], dim=0)
-    plan = generate_plan(model, list(workers.keys()))
+    tokens = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, return_tensors="pt"
+    )[0]
     tensors = {"x": tokens}
-    metadata = {"task_infos": task_infos}
-    first_worker_url = plan[0].worker_url
+    metadata = {
+        "task_id": task_id,
+        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
+    }
+    first_worker_url = list(leaders.keys())[0]
     response = requests.post(
-        f"{first_worker_url}/batch_forward", data=dumps(tensors, metadata)
+        f"{first_worker_url}/prefill", data=dumps(tensors, metadata)
     )
     if response.status_code != 200:
         raise HTTPException(status_code=500, detail="Worker error")
 
-    for task_id in task_ids:
-        while True:
-            if token_channels[task_id].get() is None:
-                break
-
-    end = time.time()
-    return end - begin
+    return StreamingResponse(relay_tokens(token_channel))
 
 
 def relay_traces(
-    channel: queue.Queue[Optional[tuple[dict[str, torch.Tensor], dict[str, str]]]],
+    channel: queue.Queue[Optional[tuple[dict[str, torch.Tensor], dict[str, Any]]]],
     total: int,
 ) -> Generator[bytes, None, None]:
     cnt = 0
@@ -250,13 +193,8 @@ def relay_traces(
         yield bytes
 
 
-class TraceRequest(BaseModel):
-    model: str
-    prompt: str
-
-
-@app.post("/trace")
-def trace(request: TraceRequest) -> Response:
+@app.post("/trace_complete")
+def trace_complete(request: CompleteRequest) -> Response:
     model = request.model
     prompt = request.prompt
 
@@ -277,16 +215,51 @@ def trace(request: TraceRequest) -> Response:
 
     # generate request
     tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-    online_workers = list(workers.keys())
-    plan = generate_plan(model, online_workers)
+    online_workers = list(leaders.keys())
+    # plan = generate_plan(model, online_workers)
     tensors = {"x": tokens}
     metadata = {
         "task_id": task_id,
-        "round": 0,
-        "plan": plan,
         "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
     }
-    first_worker_url = plan[0].worker_url
+    first_worker_url = online_workers[0]
+    response = requests.post(f"{first_worker_url}/trace", data=dumps(tensors, metadata))
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Worker error")
+    return StreamingResponse(relay_traces(trace_channel, len(online_workers)))
+
+
+@app.post("/trace_chat")
+def trace_chat(request: ChatRequest) -> Response:
+    model = request.model
+    messages = request.messages
+
+    if model not in model2layers:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    task_id = str(uuid.uuid4())
+
+    # init channel for relay, but we don't handle it inside tracing
+    token_channel = queue.Queue[Optional[str]]()
+    token_channels[task_id] = token_channel
+
+    # init traces
+    trace_channel = queue.Queue[
+        Optional[tuple[dict[str, torch.Tensor], dict[str, str]]]
+    ]()
+    trace_channels[task_id] = trace_channel
+
+    # generate request
+    tokens = tokenizer.apply_chat_template(messages, return_tensors="pt")[0]
+    tokens = tokens[: tokens.shape[0] - 1]
+    online_workers = list(leaders.keys())
+    # plan = generate_plan(model, online_workers)
+    tensors = {"x": tokens}
+    metadata = {
+        "task_id": task_id,
+        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
+    }
+    first_worker_url = online_workers[0]
     response = requests.post(f"{first_worker_url}/trace", data=dumps(tensors, metadata))
     if response.status_code != 200:
         raise HTTPException(status_code=500, detail="Worker error")
@@ -319,12 +292,15 @@ async def update_traces(requests: Request) -> None:
     tensors, metadata = loads(body)
     task_id = metadata["task_id"]
     if task_id in trace_channels:
-        if "token" in metadata:
-            trace_channels[task_id].put(
-                (tensors, {"token": tokenizer.decode(metadata["token"])})
+        trace_channels[task_id].put(
+            (
+                tensors,
+                {
+                    "output2input": metadata["output2input"],
+                    "probs": metadata["probs"],
+                },
             )
-        else:
-            trace_channels[task_id].put((tensors, {}))
+        )
     else:
         logger.warning(f"Task {task_id} not found")
 
@@ -338,4 +314,4 @@ if __name__ == "__main__":
 
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")

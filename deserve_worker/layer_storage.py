@@ -16,7 +16,7 @@ from deserve_worker.model.args import (
     llama_3_8b_args,
     llama_3_70b_args,
 )
-from deserve_worker.model.context.forward import ForwardCtx
+from deserve_worker.model.context.forward import ForwardCtx, PagedForwardCtx
 from deserve_worker.model.layer.linear import TraceEmbedding, TraceLinear
 from deserve_worker.model.layer.norm import RMSNorm
 from deserve_worker.model.llama import TransformerBlock
@@ -109,22 +109,22 @@ class LayerManager:
         if layer_name == "tok_embeddings":
             l = torch.nn.utils.skip_init(
                 TraceEmbedding,
-                ComponentId("tok_embeddings", "main"),
+                ComponentId(layer="tok_embeddings", component="main"),
                 model_args.vocab_size,
                 model_args.dim,
             )  # type: ignore
         elif layer_name.startswith("layer"):
-            l = TransformerBlock(LayerId(f"{int(layer_name[7:]):02}"), model_args)
+            l = TransformerBlock(LayerId(layer=f"{int(layer_name[7:]):02}"), model_args)
         elif layer_name == "norm":
             l = RMSNorm(
-                ComponentId("norm", "main"),
+                ComponentId(layer="norm", component="main"),
                 model_args.dim,
                 eps=model_args.norm_eps,
             )
         elif layer_name == "output":
             l = torch.nn.utils.skip_init(
                 TraceLinear,
-                ComponentId("output", "main"),
+                ComponentId(layer="output", component="main"),
                 model_args.dim,
                 model_args.vocab_size,
             )  # type: ignore
@@ -167,6 +167,12 @@ class LayerStorage:
         self.model_args = model_args
         self.need_sample = any(
             [full_layer_name.split("/")[1] == "output" for full_layer_name in layers]
+        )
+        self.need_tokenize = any(
+            [
+                full_layer_name.split("/")[1] == "tok_embeddings"
+                for full_layer_name in layers
+            ]
         )
 
     def clear(self) -> None:
@@ -228,3 +234,20 @@ class LayerStorage:
                 ongoing_datas.append(task_data)
                 ongoing_tokens.append(next_token)
         return ongoing_tokens, ongoing_datas, all_tokens, all_datas, done_datas
+
+    def calc_probs(
+        self, merged_h: torch.Tensor, task_datas: list[TaskData]
+    ) -> list[list[tuple[int, float]]]:
+        results = []
+        ptr = 0
+        for task_data in task_datas:
+            seqlen = task_data.seqlen
+            h = merged_h[ptr : ptr + seqlen]
+            ptr += seqlen
+            probs = torch.softmax(
+                h[-1],
+                dim=-1,
+            )
+            probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+            results.append(list(zip(probs_idx[:10].tolist(), probs_sort[:10].tolist())))
+        return results

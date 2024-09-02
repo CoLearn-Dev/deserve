@@ -7,18 +7,13 @@ import typer
 from safetensors.torch import load
 from transformers import AutoTokenizer  # type: ignore
 
-from deserve_client.model import (
-    CheckCtx,
-    Transformer,
-    VerifyCtx,
-    llama_3_8b_args,
-    main_device,
-)
-from deserve_controller.controller_api import app
+from deserve_client.model import CheckCtx, Transformer, VerifyCtx, llama_3_8b_args
 from deserve_worker.trace import OpId
 
 cli = typer.Typer()
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+main_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+transformer = Transformer(llama_3_8b_args, main_device)
 
 
 def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
@@ -53,7 +48,7 @@ def complete(
 @cli.command()
 def trace(model: str, prompt: str, entry_point: str = "http://localhost:19000") -> None:
     response = requests.post(
-        f"{entry_point}/trace",
+        f"{entry_point}/trace_complete",
         json={"model": model, "prompt": prompt},
         stream=True,
     )
@@ -78,7 +73,7 @@ def verify(
     model: str, prompt: str, entry_point: str = "http://localhost:19000"
 ) -> None:
     response = requests.post(
-        f"{entry_point}/trace",
+        f"{entry_point}/trace_complete",
         json={"model": model, "prompt": prompt},
         stream=True,
     )
@@ -92,16 +87,21 @@ def verify(
             tensors.update(temp_tensors)
 
     traces = {OpId.from_str(k): v for k, v in tensors.items()}
-    transformer = Transformer(llama_3_8b_args)
+    diffs: dict[OpId, float] = {}
     tokens = tokenizer(prompt, return_tensors="pt")["input_ids"].to(main_device)
-    result = transformer.forward(tokens, CheckCtx(0.03, traces))
-    if isinstance(result, torch.Tensor):
-        print("No difference found")
-    else:
-        if not transformer.verify(tokens, VerifyCtx(result.op_id, 0.03, traces)):
-            print("Difference found for", result.op_id)
-        else:
-            print("Difference found but verification failed")
+    transformer.check(tokens, CheckCtx(traces, diffs, main_device))
+    for op_id, diff in diffs.items():
+        if diff > 0.03:
+            print("Difference found for", op_id)
+            if not transformer.verify(
+                tokens, VerifyCtx(op_id, 0.03, traces, main_device)
+            ):
+                print("Verification passed for", op_id)
+            else:
+                print("Verification failed for", op_id)
+            return
+
+    print("No difference found for", op_id)
 
 
 @cli.command()

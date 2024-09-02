@@ -114,3 +114,18 @@ class JoinRequest(LLMRequest):
         }, {
             "task_id": self.task_id,
         }
+
+
+@dataclass
+class TraceRequest(LLMRequest):
+    x: torch.Tensor
+    task_id: str
+    sampling_params: SamplingParams
+
+    def into_safetensors(self) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        return {
+            "x": self.x,
+        }, {
+            "task_id": self.task_id,
+            "sampling_params": self.sampling_params.model_dump(),
+        }

@@ -11,7 +11,7 @@ from deserve_worker.execution.result import BatchResult
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import GpuPagePool
 from deserve_worker.layer_storage import LayerStorage
-from deserve_worker.model.context.paged import PagedDecodeCtx, PagedPrefillCtx
+from deserve_worker.model.context.flash import FlashDecodeCtx, FlashPrefillCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.task import TaskData, main_device
 from deserve_worker.trace import OpId
@@ -160,7 +160,7 @@ class BatchDecode(BatchExec):
 
     def step(self) -> BatchResult:
         with torch.inference_mode():
-            decode_ctx = PagedDecodeCtx.init_paged_decode_ctx(
+            decode_ctx = FlashDecodeCtx.init_paged_decode_ctx(
                 self.task_datas, self.kvcaches, decode_wrapper
             )
             model_args = self.layer_storage.model_args
@@ -197,7 +197,7 @@ class BatchPrefill(BatchExec):
 
     def step(self) -> BatchResult:
         with torch.inference_mode():
-            prefill_ctx = PagedPrefillCtx.init_paged_prefill_ctx(
+            prefill_ctx = FlashPrefillCtx.init_paged_prefill_ctx(
                 self.task_datas,
                 self.kvcaches,
                 prefill_wrapper,
@@ -219,15 +219,42 @@ class BatchPrefill(BatchExec):
 
 
 @dataclass
-class SingleTrace(BatchExec):
-    """
-    The tensor is stored in packed format. Besides, these kinds of reequests are not allowed to be batched.
-    """
-
+class SingleTrace:
+    xs: torch.Tensor  # stored in ragged format or packed format
+    layer_storage: LayerStorage
+    task_datas: list[TaskData]
     traces: dict[OpId, torch.Tensor]
+    output2input: dict[OpId, list[OpId]]
 
-    def step(self) -> list[BatchResult]:
-        raise NotImplementedError
+    def step(self) -> tuple[BatchResult, list[tuple[int, float]]]:
+        with torch.inference_mode():
+            forward_ctx = TraceForwardCtx.init_trace_forward_ctx(
+                self.task_datas,
+                global_freqs_cis,
+                self.traces,
+                self.output2input,
+            )
+            result = self.layer_storage.forward(self.xs, forward_ctx).squeeze(dim=0)
+            return self.post_process(result)
 
-    def post_process(self, result: torch.Tensor) -> BatchResult:
-        raise NotImplementedError
+    def post_process(self, result: torch.Tensor) -> tuple[BatchResult, list[tuple[int, float]]]:
+        if self.layer_storage.need_sample:
+            _, _, all_tokens, all_datas, _ = self.layer_storage.sample(
+                result, self.task_datas
+            )
+            xs = torch.empty(0, dtype=torch.int, device=main_device)
+            return BatchResult(
+                xs,
+                [],
+                torch.cat(all_tokens),
+                [task_data.task_id for task_data in all_datas],
+                [task_data.task_id for task_data in all_datas],
+            ), self.layer_storage.calc_probs(result, self.task_datas)[0] # because we only serve one request in batch
+        else:
+            return BatchResult(
+                result,
+                [task_data.task_id for task_data in self.task_datas],
+                result,
+                [task_data.task_id for task_data in self.task_datas],
+                [],
+            ), []

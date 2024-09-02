@@ -10,12 +10,12 @@ from flashinfer import (  # type: ignore
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import GpuPagePool
 from deserve_worker.model.args import ModelArgs
-from deserve_worker.model.context.forward import ForwardCtx
+from deserve_worker.model.context.forward import PagedForwardCtx
 from deserve_worker.task import TaskData, main_device
 
 
 @dataclass
-class PagedForwardCtx(ForwardCtx):
+class FlashForwardCtx(PagedForwardCtx):
     indptr: torch.Tensor
     kv_page_indices: torch.Tensor
     kv_page_indptr: torch.Tensor
@@ -25,7 +25,7 @@ class PagedForwardCtx(ForwardCtx):
     def init_paged_forward_ctx(
         task_datas: list[TaskData],
         kvcaches: list[PagedKVCache[GpuPagePool]],
-    ) -> "PagedForwardCtx":
+    ) -> "FlashForwardCtx":
         kv_last_page_lens = []
         for task_data, kvcache in zip(task_datas, kvcaches):
             total_len = task_data.start_pos + task_data.seqlen
@@ -50,7 +50,7 @@ class PagedForwardCtx(ForwardCtx):
             device=main_device,
             dtype=torch.int32,
         )
-        return PagedForwardCtx(
+        return FlashForwardCtx(
             page_pool=kvcaches[0].pool,
             offsets=offsets,
             bsz=len(task_datas),
@@ -64,7 +64,7 @@ class PagedForwardCtx(ForwardCtx):
 
 
 @dataclass
-class PagedDecodeCtx(PagedForwardCtx):
+class FlashDecodeCtx(FlashForwardCtx):
     decode_wrapper: BatchDecodeWithPagedKVCacheWrapper
 
     @staticmethod
@@ -72,9 +72,9 @@ class PagedDecodeCtx(PagedForwardCtx):
         task_datas: list[TaskData],
         kvcaches: list[PagedKVCache[GpuPagePool]],
         wrapper: BatchDecodeWithPagedKVCacheWrapper,
-    ) -> "PagedDecodeCtx":
-        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(task_datas, kvcaches)
-        return PagedDecodeCtx(
+    ) -> "FlashDecodeCtx":
+        forward_ctx = FlashForwardCtx.init_paged_forward_ctx(task_datas, kvcaches)
+        return FlashDecodeCtx(
             page_pool=forward_ctx.page_pool,
             offsets=forward_ctx.offsets,
             bsz=forward_ctx.bsz,
@@ -89,7 +89,7 @@ class PagedDecodeCtx(PagedForwardCtx):
 
 
 @dataclass
-class PagedPrefillCtx(PagedForwardCtx):
+class FlashPrefillCtx(FlashForwardCtx):
     prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper
 
     @staticmethod
@@ -97,9 +97,9 @@ class PagedPrefillCtx(PagedForwardCtx):
         task_datas: list[TaskData],
         kvcaches: list[PagedKVCache[GpuPagePool]],
         wrapper: BatchPrefillWithPagedKVCacheWrapper,
-    ) -> "PagedPrefillCtx":
-        forward_ctx = PagedForwardCtx.init_paged_forward_ctx(task_datas, kvcaches)
-        return PagedPrefillCtx(
+    ) -> "FlashPrefillCtx":
+        forward_ctx = FlashForwardCtx.init_paged_forward_ctx(task_datas, kvcaches)
+        return FlashPrefillCtx(
             page_pool=forward_ctx.page_pool,
             offsets=forward_ctx.offsets,
             bsz=forward_ctx.bsz,
