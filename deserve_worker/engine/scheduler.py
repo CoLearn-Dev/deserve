@@ -12,6 +12,7 @@ from deserve_worker.request import (
     JoinRequest,
     LLMRequest,
     PrefillRequest,
+    TraceRequest,
 )
 from deserve_worker.task import TaskData, main_dtype
 
@@ -24,6 +25,7 @@ class Scheduler(Processor):
         page_size: int,
         batch_size: int,
         layers: list[str],
+        worker_url: str,
         next_worker_url: str,
         controller_url: str,
     ) -> None:
@@ -33,6 +35,7 @@ class Scheduler(Processor):
             page_size,
             batch_size,
             layers,
+            worker_url,
             next_worker_url,
             controller_url,
         )
@@ -75,6 +78,8 @@ class Scheduler(Processor):
                         next_request = self.process_decode(request)
                 elif isinstance(request, JoinRequest):
                     self.process_join(request)
+                elif isinstance(request, TraceRequest):
+                    next_request = self.process_trace(request)
                 else:
                     raise ValueError(f"Unknown request type: {request}")
                 if next_request is not None:

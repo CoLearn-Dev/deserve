@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from deserve_worker.model.context.forward import ForwardCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.model.utils import trace_op
-from deserve_worker.trace import ComponentId, OpId
+from deserve_worker.trace import ComponentId
 
 
 class TraceLinear(torch.nn.Module):
@@ -27,7 +27,7 @@ class TraceLinear(torch.nn.Module):
     @torch.inference_mode()
     def forward(self, x: torch.Tensor, ctx: ForwardCtx) -> torch.Tensor:
         out = self.linear(x)
-        trace_op(ctx, self.component_id.with_op("output"), out)
+        trace_op(ctx, self.component_id.with_op("output"), out, None)
         return out  # type: ignore
 
     def load_state_dict(
@@ -60,8 +60,10 @@ class TraceEmbedding(torch.nn.Module):
         x: torch.Tensor,
         ctx: ForwardCtx,
     ) -> torch.Tensor:
+        if isinstance(ctx, TraceForwardCtx):
+            x = x.unsqueeze(0)
         out = self.embedding(x)
-        trace_op(ctx, self.component_id.with_op("output"), out)
+        trace_op(ctx, self.component_id.with_op("output"), out, None)
         return out  # type: ignore
 
     def load_state_dict(
@@ -119,8 +121,20 @@ class FeedForward(torch.nn.Module):
         w1 = F.silu(self.w1(x))  # [*, hidden_dim]
         w3 = self.w3(x)  # [*, hidden_dim]
         w2 = self.w2(w1 * w3)  # [*, dim]
-        trace_op(ctx, self.component_id.with_op("w1"), w1)
-        trace_op(ctx, self.component_id.with_op("w3"), w3)
-        trace_op(ctx, self.component_id.with_op("w2"), w2)
+        if isinstance(ctx, TraceForwardCtx):
+            input_op = ctx.last_op_id
+            trace_op(ctx, self.component_id.with_op("w1"), w1, [input_op])
+            trace_op(
+                ctx,
+                self.component_id.with_op("w3"),
+                w3,
+                [input_op],
+            )
+            trace_op(
+                ctx,
+                self.component_id.with_op("w2"),
+                w2,
+                [self.component_id.with_op("w1"), self.component_id.with_op("w3")],
+            )
 
         return w2  # type: ignore

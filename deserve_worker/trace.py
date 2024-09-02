@@ -1,28 +1,28 @@
 from dataclasses import dataclass
 
+from pydantic import BaseModel
 
-@dataclass
-class LayerId:
+
+class LayerId(BaseModel):
     layer: str
 
     def with_component(self, component: str) -> "ComponentId":
-        return ComponentId(self.layer, component)
+        return ComponentId(layer=self.layer, component=component)
 
     def __str__(self) -> str:
         return self.layer
 
     @staticmethod
     def from_str(s: str) -> "LayerId":
-        return LayerId(s)
+        return LayerId(layer=s)
 
 
-@dataclass
-class ComponentId:
+class ComponentId(BaseModel):
     layer: str
     component: str
 
     def with_op(self, op: str) -> "OpId":
-        return OpId(self.layer, self.component, op)
+        return OpId(layer=self.layer, component=self.component, op=op)
 
     def __str__(self) -> str:
         return f"{self.layer}.{self.component}"
@@ -30,11 +30,10 @@ class ComponentId:
     @staticmethod
     def from_str(s: str) -> "ComponentId":
         layer, component = s.split(".")
-        return ComponentId(layer, component)
+        return ComponentId(layer=layer, component=component)
 
 
-@dataclass
-class OpId:
+class OpId(BaseModel):
     layer: str
     component: str
     op: str
@@ -48,4 +47,4 @@ class OpId:
     @staticmethod
     def from_str(s: str) -> "OpId":
         layer, component, op = s.split(".")
-        return OpId(layer, component, op)
+        return OpId(layer=layer, component=component, op=op)

@@ -5,12 +5,12 @@ import torch.nn.functional as F
 from flashinfer import append_paged_kv_cache, apply_rope  # type: ignore
 
 from deserve_worker.model.args import ModelArgs
-from deserve_worker.model.context.forward import ForwardCtx
-from deserve_worker.model.context.paged import (
-    PagedDecodeCtx,
-    PagedForwardCtx,
-    PagedPrefillCtx,
+from deserve_worker.model.context.flash import (
+    FlashDecodeCtx,
+    FlashForwardCtx,
+    FlashPrefillCtx,
 )
+from deserve_worker.model.context.forward import ForwardCtx, PagedForwardCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.model.utils import trace_op
 from deserve_worker.trace import ComponentId
@@ -144,7 +144,7 @@ class Attention(torch.nn.Module):
         """
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        if isinstance(ctx, PagedForwardCtx):
+        if isinstance(ctx, FlashForwardCtx):
             xq = xq.view(-1, self.n_local_heads, self.head_dim)
             xk = xk.view(-1, self.n_local_kv_heads, self.head_dim)
             xv = xv.view(-1, self.n_local_kv_heads, self.head_dim)
@@ -158,7 +158,7 @@ class Attention(torch.nn.Module):
             return self.traced_forward(xq, xk, xv, ctx).view(bsz, seqlen, -1)  # type: ignore
 
     def paged_forward(
-        self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, ctx: PagedForwardCtx
+        self, xq: torch.Tensor, xk: torch.Tensor, xv: torch.Tensor, ctx: FlashForwardCtx
     ) -> torch.Tensor:
         """
         The return tensor is in ragged format.
@@ -181,10 +181,10 @@ class Attention(torch.nn.Module):
             ctx.kv_page_indptr,
             ctx.kv_last_page_lens,
         )
-        if isinstance(ctx, PagedDecodeCtx):
+        if isinstance(ctx, FlashDecodeCtx):
             output = ctx.decode_wrapper.forward(xq, pages).view(-1, self.dim)
         else:
-            assert isinstance(ctx, PagedPrefillCtx)
+            assert isinstance(ctx, FlashPrefillCtx)
             output = ctx.prefill_wrapper.forward(
                 xq,
                 pages,
@@ -201,43 +201,41 @@ class Attention(torch.nn.Module):
     ) -> torch.Tensor:
         seqlen = xqs.shape[1]
         output_list = []
-        pages = ctx.page_pool.get_layered_pages(ctx.layer_id)
-        pages_k = pages[:, 0, :, :, :].flatten(0, 1)
-        pages_v = pages[:, 1, :, :, :].flatten(0, 1)
-        for i, start_pos in enumerate(ctx.offsets):
-            xq = xqs[i].view(1, seqlen, self.n_local_heads, self.head_dim)
-            xk = xks[i].view(1, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xvs[i].view(1, seqlen, self.n_local_kv_heads, self.head_dim)
-            trace_op(ctx, self.component_id.with_op("xq"), xq)
-            trace_op(ctx, self.component_id.with_op("xk"), xk)
-            trace_op(ctx, self.component_id.with_op("xv"), xv)
+        ptr = 0
+        op_input = ctx.last_op_id
+        for i, seqlen in enumerate(ctx.seqlens):
+            xq = xqs[ptr : ptr + seqlen]
+            xk = xks[ptr : ptr + seqlen]
+            xv = xvs[ptr : ptr + seqlen]
+            ptr += seqlen
+            trace_op(ctx, self.component_id.with_op("xq"), xq, [op_input])
+            trace_op(ctx, self.component_id.with_op("xk"), xk, [op_input])
+            trace_op(ctx, self.component_id.with_op("xv"), xv, [op_input])
 
-            # remember consecutive block table [bsz, len] corresponds to memory [bsz, len * block_size, 8, 128]
-            begin, end = ctx.ranges[i]
-            cache_k = pages_k[begin : end + 1].view(
-                1, (end - begin + 1) * ctx.page_pool.page_size, 8, 128
-            )
-            cache_v = pages_v[begin : end + 1].view(
-                1, (end - begin + 1) * ctx.page_pool.page_size, 8, 128
-            )
-
-            freqs_cis = ctx.global_freqs_cis[start_pos : start_pos + seqlen]
+            freqs_cis = ctx.global_freqs_cis[0:seqlen]
             mask = None
             if seqlen > 1:
                 mask = torch.full(
                     (1, 1, seqlen, seqlen), float("-inf"), device=xq.device
                 )
-                mask = torch.triu(mask, diagonal=start_pos + 1).type_as(xq)
+                mask = torch.triu(mask, diagonal=1).type_as(xq)
 
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-            trace_op(ctx, self.component_id.with_op("xq_rotary"), xq)
-            trace_op(ctx, self.component_id.with_op("xk_rotary"), xk)
+            trace_op(
+                ctx,
+                self.component_id.with_op("xq_rotary"),
+                xq,
+                [self.component_id.with_op("xq")],
+            )
+            trace_op(
+                ctx,
+                self.component_id.with_op("xk_rotary"),
+                xk,
+                [self.component_id.with_op("xk")],
+            )
 
-            cache_k[:, start_pos : start_pos + seqlen] = xk
-            cache_v[:, start_pos : start_pos + seqlen] = xv
-
-            keys = cache_k[:, : start_pos + seqlen]
-            values = cache_v[:, : start_pos + seqlen]
+            keys = xk
+            values = xv
 
             # repeat k/v heads if n_kv_heads < n_heads
             keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -254,15 +252,33 @@ class Attention(torch.nn.Module):
                     scores + mask
                 )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            trace_op(ctx, self.component_id.with_op("scores"), scores)
+            trace_op(
+                ctx,
+                self.component_id.with_op("scores"),
+                scores,
+                [
+                    self.component_id.with_op("xq_rotary"),
+                    self.component_id.with_op("xk_rotary"),
+                ],
+            )
             output = torch.matmul(
                 scores, values
             )  # (bs, n_local_heads, seqlen, head_dim)
 
             output = output.transpose(1, 2).contiguous().view(1, seqlen, -1)
-            trace_op(ctx, self.component_id.with_op("output"), output)
+            trace_op(
+                ctx,
+                self.component_id.with_op("output"),
+                output,
+                [self.component_id.with_op("scores"), self.component_id.with_op("xv")],
+            )
             output_list.append(output)
         output = torch.cat([x for x in output_list])
         result = self.wo(output)
-        trace_op(ctx, self.component_id.with_op("weighted_output"), result)
+        trace_op(
+            ctx,
+            self.component_id.with_op("weighted_output"),
+            result,
+            [self.component_id.with_op("output")],
+        )
         return result  # type: ignore

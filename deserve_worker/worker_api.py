@@ -6,11 +6,15 @@ from typing import Any
 import torch
 import uvicorn
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
 
 from deserve_worker.engine.processor import Processor
 from deserve_worker.engine.scheduler import Scheduler
-from deserve_worker.request import DecodeRequest, JoinRequest, PrefillRequest
+from deserve_worker.request import (
+    DecodeRequest,
+    JoinRequest,
+    PrefillRequest,
+    TraceRequest,
+)
 from deserve_worker.task import SamplingParams, main_device
 
 from .model.utils import loads
@@ -96,6 +100,21 @@ async def join(request: Request) -> None:
     llm_engine.add_request(JoinRequest(x=tensors["x"].to(main_device), task_id=task_id))
 
 
+@app.post("/trace")
+async def trace(request: Request) -> None:
+    body = await request.body()
+    tensors, metadata = loads(body)
+    task_id = metadata["task_id"]
+    sampling_params = SamplingParams.model_validate(metadata["sampling_params"])
+    llm_engine.add_request(
+        TraceRequest(
+            x=tensors["x"].to(main_device),
+            task_id=task_id,
+            sampling_params=sampling_params,
+        )
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str)
@@ -117,6 +136,7 @@ if __name__ == "__main__":
     layer_begin = convert_name_to_id(args.layer_begin, len(layers))
     layer_end = convert_name_to_id(args.layer_end, len(layers))
     print(f"Serve from {layers[layer_begin]} to {layers[layer_end - 1]}")
+    worker_url = f"http://localhost:{args.port}"
     if layer_begin == 0:
         llm_engine = Scheduler(
             args.num_rounds,
@@ -126,6 +146,7 @@ if __name__ == "__main__":
             layers[layer_begin:layer_end],
             next_worker_url=args.next_worker_url,
             controller_url=args.controller_url,
+            worker_url=worker_url,
         )
     else:
         llm_engine = Processor(
@@ -136,6 +157,8 @@ if __name__ == "__main__":
             layers[layer_begin:layer_end],
             next_worker_url=args.next_worker_url,
             controller_url=args.controller_url,
+            worker_url=worker_url,
         )
     threading.Thread(target=llm_engine.run, daemon=True).start()
+    threading.Thread(target=llm_engine.heartbeat, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=args.port)

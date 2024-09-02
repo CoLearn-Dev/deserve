@@ -1,7 +1,8 @@
 import torch
 
 from deserve_worker.model.args import ModelArgs
-from deserve_worker.model.context.forward import ForwardCtx
+from deserve_worker.model.context.forward import PagedForwardCtx
+from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.model.layer.attention import Attention
 from deserve_worker.model.layer.linear import FeedForward
 from deserve_worker.model.layer.norm import RMSNorm
@@ -53,13 +54,35 @@ class TransformerBlock(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        ctx: ForwardCtx,
+        ctx: PagedForwardCtx,
     ) -> torch.Tensor:
+        if isinstance(ctx, TraceForwardCtx):
+            init_input_op = ctx.last_op_id
         h = x + self.attention.forward(
             self.attention_norm(x, ctx),
             ctx,
         )
-        trace_op(ctx, self.layer_id.with_component("attention").with_op("res"), h)
+        if isinstance(ctx, TraceForwardCtx):
+            later_input_op = ctx.last_op_id
+            trace_op(
+                ctx,
+                self.layer_id.with_component("attention").with_op("res"),
+                h,
+                [
+                    init_input_op,
+                    later_input_op,
+                ],
+            )
         out = h + self.feed_forward.forward(self.ffn_norm(h, ctx), ctx)
-        trace_op(ctx, self.layer_id.with_component("feed_forward").with_op("res"), out)
+        if isinstance(ctx, TraceForwardCtx):
+            later_input_op = ctx.last_op_id
+            trace_op(
+                ctx,
+                self.layer_id.with_component("feed_forward").with_op("res"),
+                out,
+                [
+                    self.layer_id.with_component("attention").with_op("res"),
+                    later_input_op,
+                ],
+            )
         return out
