@@ -338,21 +338,21 @@ class Attention(nn.Module):
 
         x_inter = x.to(ctx.intermediate_dtype)
         xq = (
-            self.wq(x_inter)
+            (x_inter @ self.wq.weight.T.to(ctx.intermediate_dtype))
             .view(bsz, seqlen, self.n_local_heads, self.head_dim)
             .to(ctx.result_dtype)
         )
         ctx.trace(self.component_id.with_op("xq"), xq)
 
         xk = (
-            self.wk(x_inter)
+            (x_inter @ self.wk.weight.T.to(ctx.intermediate_dtype))
             .view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             .to(ctx.result_dtype)
         )
         ctx.trace(self.component_id.with_op("xk"), xk)
 
         xv = (
-            self.wv(x_inter)
+            (x_inter @ self.wv.weight.T.to(ctx.intermediate_dtype))
             .view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             .to(ctx.result_dtype)
         )
@@ -399,7 +399,10 @@ class Attention(nn.Module):
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         ctx.trace(self.component_id.with_op("output"), output)
 
-        result = self.wo(output.to(ctx.intermediate_dtype)).to(ctx.result_dtype)
+        result = (
+            output.to(ctx.intermediate_dtype)
+            @ self.wo.weight.T.to(ctx.intermediate_dtype)
+        ).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("weighted_output"), result)
         return result  # type: ignore
 
@@ -471,13 +474,20 @@ class FeedForward(nn.Module):
         ctx: TraceCtx,
     ) -> torch.Tensor:
         # check w1, w3, w2
-        w1 = F.silu(self.w1(x.to(ctx.intermediate_dtype))).to(ctx.result_dtype)
+        w1 = F.silu(
+            x.to(ctx.intermediate_dtype) @ self.w1.weight.T.to(ctx.intermediate_dtype)
+        ).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("w1"), w1)
-        w3 = self.w3(x.to(ctx.intermediate_dtype)).to(ctx.result_dtype)
+        w3 = (
+            x.to(ctx.intermediate_dtype) @ self.w3.weight.T.to(ctx.intermediate_dtype)
+        ).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("w3"), w3)
-        w2 = self.w2(w1.to(ctx.intermediate_dtype) * w3.to(ctx.intermediate_dtype)).to(
-            ctx.result_dtype
-        )
+        w2 = (
+            (w1.to(ctx.intermediate_dtype) * w3.to(ctx.intermediate_dtype))
+            .to(ctx.result_dtype)
+            .to(ctx.intermediate_dtype)
+            @ self.w2.weight.T.to(ctx.intermediate_dtype)
+        ).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("w2"), w2)
         return w2  # type: ignore
 
@@ -510,7 +520,10 @@ class TraceLinear(nn.Module):
 
     @torch.inference_mode()
     def forward(self, x: torch.Tensor, ctx: TraceCtx) -> torch.Tensor:
-        result = self.linear(x.to(ctx.intermediate_dtype)).to(ctx.result_dtype)
+        result = (
+            x.to(ctx.intermediate_dtype)
+            @ self.linear.weight.T.to(ctx.intermediate_dtype)
+        ).to(ctx.result_dtype)
         ctx.trace(self.component_id.with_op("output"), result)
         return result  # type: ignore
 
@@ -888,8 +901,8 @@ async def verify(request: Request) -> bool:
 
 class ChatRequest(BaseModel):
     messages: list[dict[str, str]]
-    intermediate_dtype: str
-    result_dtype: str
+    intermediate_dtype: str = "float16"
+    result_dtype: str = "float16"
 
 
 def get_dtype(dtype_str: str) -> torch.dtype:
@@ -927,8 +940,10 @@ async def forward(request: ChatRequest) -> str:
 @app.post("/trace")
 async def trace(request: ChatRequest) -> Response:
     messages = request.messages
-    intermediate_dtype = request.intermediate_dtype
-    result_dtype = request.result_dtype
+    intermediate_dtype_str = request.intermediate_dtype
+    result_dtype_str = request.result_dtype
+    intermediate_dtype = get_dtype(intermediate_dtype_str)
+    result_dtype = get_dtype(result_dtype_str)
     tokens = tokenizer.apply_chat_template(messages, return_tensors="pt").to(device)
     _, seqlen = tokens.shape
     tokens = tokens[:, : seqlen - 1]
@@ -936,15 +951,15 @@ async def trace(request: ChatRequest) -> Response:
     tensor = model.forward(
         tokens,
         TraceCtx(
-            get_dtype(intermediate_dtype),
-            get_dtype(result_dtype),
+            intermediate_dtype,
+            result_dtype,
             traces,
         ),
     )
     probs = torch.softmax(
-        tensor[-1, -1],
+        tensor[-1, -1].to(intermediate_dtype),
         dim=-1,
-    )
+    ).to(result_dtype)
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
 
     str_traces = {str(k): v.cpu() for k, v in traces.items()}
