@@ -27,13 +27,20 @@ model2alias = {
     "meta-llama/Meta-Llama-3-70B-Instruct": "llama-3-70b-instruct-slice",
     "meta-llama/Meta-Llama-3-8B-Instruct": "llama-3-8b-instruct-slice",
 }
-token_channels: dict[str, queue.Queue[Optional[str]]] = {}
 trace_channels: dict[
     str, queue.Queue[Optional[tuple[dict[str, torch.Tensor], dict[str, str]]]]
 ] = {}
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
 STOP_TOKEN_IDS = [128001, 128009]
+
+
+class Generation(BaseModel):
+    token: str
+    probs: Optional[list[tuple[str, float]]]
+
+
+token_channels: dict[str, queue.Queue[Optional[Generation]]] = {}
 
 
 def dumps(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> bytes:
@@ -95,13 +102,13 @@ class PlanStep(BaseModel):
 
 
 def relay_tokens(
-    channel: queue.Queue[Optional[str]],
+    channel: queue.Queue[Optional[Generation]],
 ) -> Generator[bytes, None, None]:
     while True:
         value = channel.get()
         if value is None:
             break
-        yield value.encode("utf-8")
+        yield pickle.dumps(value)
 
 
 class CompleteRequest(BaseModel):
@@ -120,7 +127,7 @@ def complete(request: CompleteRequest) -> StreamingResponse:
     task_id = str(uuid.uuid4())
 
     # init channel for relay
-    token_channel = queue.Queue[Optional[str]]()
+    token_channel = queue.Queue[Optional[Generation]]()
     token_channels[task_id] = token_channel
 
     # generate request
@@ -128,7 +135,12 @@ def complete(request: CompleteRequest) -> StreamingResponse:
     tensors = {"x": tokens}
     metadata = {
         "task_id": task_id,
-        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
+        "sampling_params": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_seq_len": 2048,
+            "dump_probs_num": 10,
+        },
     }
     first_worker_url = list(leaders.keys())[0]
     response = requests.post(
@@ -156,7 +168,7 @@ def chat(request: ChatRequest) -> StreamingResponse:
     task_id = str(uuid.uuid4())
 
     # init channel for relay
-    token_channel = queue.Queue[Optional[str]]()
+    token_channel = queue.Queue[Optional[Generation]]()
     token_channels[task_id] = token_channel
 
     # generate request
@@ -204,7 +216,7 @@ def trace_complete(request: CompleteRequest) -> Response:
     task_id = str(uuid.uuid4())
 
     # init channel for relay, but we don't handle it inside tracing
-    token_channel = queue.Queue[Optional[str]]()
+    token_channel = queue.Queue[Optional[Generation]]()
     token_channels[task_id] = token_channel
 
     # init traces
@@ -240,7 +252,7 @@ def trace_chat(request: ChatRequest) -> Response:
     task_id = str(uuid.uuid4())
 
     # init channel for relay, but we don't handle it inside tracing
-    token_channel = queue.Queue[Optional[str]]()
+    token_channel = queue.Queue[Optional[Generation]]()
     token_channels[task_id] = token_channel
 
     # init traces
@@ -268,22 +280,24 @@ def trace_chat(request: ChatRequest) -> Response:
 
 class UpdateTaskRequest(BaseModel):
     task_id: str
-    output_tokens: list[int]  # [seqlen], in normal case, seqlen=1
+    output_token: int  # [seqlen], in normal case, seqlen=1
+    needed_probs: Optional[list[tuple[int, float]]]
 
 
 @app.post("/update_tasks")
 def update_tasks(requests: list[UpdateTaskRequest]) -> None:
     for request in requests:
         task_id = request.task_id
-        for token_id in request.output_tokens:
-            if token_id in STOP_TOKEN_IDS:
-                token_channels[task_id].put(None)
-            else:
-                token = tokenizer.decode(token_id)
-                if task_id in token_channels:
-                    token_channels[task_id].put(token)
-                else:
-                    logger.warning(f"Task {task_id} not found")
+        token_id = request.output_token
+        token = tokenizer.decode(token_id)
+        if request.needed_probs is not None:
+            probs = [(tokenizer.decode(token), p) for token, p in request.needed_probs]
+        else:
+            probs = None
+        if task_id in token_channels:
+            token_channels[task_id].put(Generation(token=token, probs=probs))
+        else:
+            logger.warning(f"Task {task_id} not found")
 
 
 @app.post("/update_traces")

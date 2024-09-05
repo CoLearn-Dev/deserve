@@ -106,4 +106,4 @@ class Group:
         return decode.step()
 
     def synchronize(self) -> None:
-        self.cuda_stream.synchronize()
+        self.cuda_stream.synchronize()  # type: ignore
