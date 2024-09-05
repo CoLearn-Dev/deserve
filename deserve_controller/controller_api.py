@@ -232,7 +232,12 @@ def trace_complete(request: CompleteRequest) -> Response:
     tensors = {"x": tokens}
     metadata = {
         "task_id": task_id,
-        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
+        "sampling_params": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_seq_len": 2048,
+            "dump_probs_num": -1,
+        },
     }
     first_worker_url = online_workers[0]
     response = requests.post(f"{first_worker_url}/trace", data=dumps(tensors, metadata))
@@ -269,7 +274,12 @@ def trace_chat(request: ChatRequest) -> Response:
     tensors = {"x": tokens}
     metadata = {
         "task_id": task_id,
-        "sampling_params": {"temperature": 0.0, "top_p": 1.0, "max_seq_len": 2048},
+        "sampling_params": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_seq_len": 2048,
+            "dump_probs_num": -1,
+        },
     }
     first_worker_url = online_workers[0]
     response = requests.post(f"{first_worker_url}/trace", data=dumps(tensors, metadata))
@@ -306,13 +316,15 @@ async def update_traces(requests: Request) -> None:
     tensors, metadata = loads(body)
     task_id = metadata["task_id"]
     if task_id in trace_channels:
+        new_metadata: dict[str, Any] = {
+            "token": tokenizer.decode(metadata["token"]),
+            "probs": {tokenizer.decode(token): p for token, p in metadata["probs"]},
+            "output2input": metadata["output2input"],
+        }
         trace_channels[task_id].put(
             (
                 tensors,
-                {
-                    "output2input": metadata["output2input"],
-                    "probs": metadata["probs"],
-                },
+                new_metadata,
             )
         )
     else:

@@ -5,6 +5,13 @@ authors = [
   { name="Example Author", email="author@example.com" },
 ]
 description = "Deserve Client"
+dependencies = [
+  "requests",
+  "safetensors",
+  "torch==2.3.1",
+  "transformers",
+  "typer",
+]
 requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",

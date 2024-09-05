@@ -88,3 +88,11 @@ llama_3_70b_args = ModelArgs(
     max_batch_size=32,
     max_seq_len=2048,
 )
+
+def get_model_args(model_name: str) -> ModelArgs:
+    if model_name == "llama-3-8b-instruct-slice": 
+        return llama_3_8b_args
+    elif model_name == "llama-3-70b-instruct-slice":
+        return llama_3_70b_args
+    else:
+        raise ValueError(f"Unknown model: {model_name}")

@@ -221,10 +221,13 @@ class LayerStorage:
                 probs = torch.softmax(h[-1] / sampling_params.temperature, dim=-1)
                 next_token = sample_top_p(probs, sampling_params.top_p).reshape(1)
             else:
-                if sampling_params.dump_probs_num > 0:
+                if sampling_params.dump_probs_num != 0:
                     probs = torch.softmax(h[-1], dim=-1)
                     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
-                    len = min(sampling_params.dump_probs_num, probs.shape[-1])
+                    if sampling_params.dump_probs_num == -1:
+                        len = probs.shape[-1]
+                    else:
+                        len = min(sampling_params.dump_probs_num, probs.shape[-1])
                     needed_probs.append(
                         (
                             task_data,

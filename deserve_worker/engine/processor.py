@@ -3,7 +3,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 import torch
@@ -15,6 +15,7 @@ from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool, GpuPagePool
 from deserve_worker.kvcache.pinned.pinned_memory import PinnedMemory
 from deserve_worker.layer_storage import LayerManager
+from deserve_worker.model.args import get_model_args, llama_3_70b_args
 from deserve_worker.model.utils import dumps
 from deserve_worker.request import (
     DecodeRequest,
@@ -23,6 +24,7 @@ from deserve_worker.request import (
     PrefillRequest,
     TraceRequest,
 )
+from deserve_worker.resource import ResourceCollector
 from deserve_worker.task import TaskData, TaskManager, main_device, main_dtype
 from deserve_worker.trace import OpId
 
@@ -58,6 +60,9 @@ class Processor:
         self.resumed_decode_kvcaches: dict[str, PagedKVCache[GpuPagePool]] = {}
         self.layer_manager = LayerManager(main_device)
         self.layer_storage = self.layer_manager.get_layer_storage(layers)
+        self.model_args = get_model_args(layers[0].split("/")[0])
+        self.resource_collector = ResourceCollector(self.model_args)
+        self.resource_collector.print_resources()
         self.groups = [
             Group(
                 self.cpu_page_pool,
@@ -144,6 +149,8 @@ class Processor:
 
     def send_traces(
         self,
+        token: Optional[torch.Tensor],
+        probs: Optional[list[tuple[int, float]]],
         traces: dict[OpId, torch.Tensor],
         output2input: dict[OpId, list[OpId]],
         task_id: str,
@@ -153,10 +160,14 @@ class Processor:
             str(op_id): [str(input_op_id) for input_op_id in input_op_ids]
             for op_id, input_op_ids in output2input.items()
         }
-        metadata = {
+        metadata: dict[str, Any] = {
             "task_id": task_id,
             "output2input": str_output2input,
         }
+        if token is not None:
+            metadata["token"] = token.tolist()[0]
+        if probs is not None:
+            metadata["probs"] = probs
         tensors = {str(op_id): tensor for op_id, tensor in traces.items()}
         self.network_executor.submit(requests.post, url, data=dumps(tensors, metadata))
 
@@ -270,9 +281,14 @@ class Processor:
             output2input=output2input,
         )
         result = trace.step()
-        self.send_traces(traces, output2input, request.task_id)
         if self.layer_storage.need_sample:
-            self.send_result(result.all_xs, result.all_task_ids, result.needed_probs)
+            self.send_traces(
+                result.all_xs,
+                result.needed_probs[request.task_id],
+                traces,
+                output2input,
+                request.task_id,
+            )
             return None
         else:
             request.x = result.all_xs
