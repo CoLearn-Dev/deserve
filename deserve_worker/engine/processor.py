@@ -125,10 +125,19 @@ class Processor:
         tensors, metadata = request.into_safetensors()
         self.network_executor.submit(requests.post, url, data=dumps(tensors, metadata))
 
-    def send_tokens(self, tokens: torch.Tensor, task_ids: list[str]) -> None:
+    def send_result(
+        self,
+        tokens: torch.Tensor,
+        task_ids: list[str],
+        needed_probs: dict[str, list[tuple[int, float]]],
+    ) -> None:
         url = f"{self.controller_url}/update_tasks"
         tosend = [
-            {"task_id": task_id, "output_tokens": [token]}
+            {
+                "task_id": task_id,
+                "output_token": token,
+                "needed_probs": needed_probs.get(task_id),
+            }
             for task_id, token in zip(task_ids, tokens.tolist())
         ]
         self.network_executor.submit(requests.post, url, json=tosend)
@@ -136,7 +145,6 @@ class Processor:
     def send_traces(
         self,
         traces: dict[OpId, torch.Tensor],
-        probs: list[tuple[int, float]],
         output2input: dict[OpId, list[OpId]],
         task_id: str,
     ) -> None:
@@ -148,7 +156,6 @@ class Processor:
         metadata = {
             "task_id": task_id,
             "output2input": str_output2input,
-            "probs": probs,
         }
         tensors = {str(op_id): tensor for op_id, tensor in traces.items()}
         self.network_executor.submit(requests.post, url, data=dumps(tensors, metadata))
@@ -168,7 +175,7 @@ class Processor:
             task_data = self.task_manager.get(task_id)
             task_data.step()
         if self.layer_storage.need_sample:
-            self.send_tokens(result.all_xs, result.all_task_ids)
+            self.send_result(result.all_xs, result.all_task_ids, result.needed_probs)
         if len(result.ongoing_task_ids) > 0:
             if self.layer_storage.need_sample:
                 return JoinRequest(x=result.all_xs, task_id=task_id)
@@ -225,7 +232,9 @@ class Processor:
         if len(request.exec_task_ids) > 0:
             result = group.exec(request.xs, request.exec_task_ids)
             if self.layer_storage.need_sample:
-                self.send_tokens(result.all_xs, result.all_task_ids)
+                self.send_result(
+                    result.all_xs, result.all_task_ids, result.needed_probs
+                )
 
             for task_id in result.ongoing_task_ids:
                 task_data = self.task_manager.get(task_id)
@@ -260,10 +269,10 @@ class Processor:
             traces=traces,
             output2input=output2input,
         )
-        result, probs = trace.step()
-        self.send_traces(traces, probs, output2input, request.task_id)
+        result = trace.step()
+        self.send_traces(traces, output2input, request.task_id)
         if self.layer_storage.need_sample:
-            self.send_tokens(result.all_xs, result.all_task_ids)
+            self.send_result(result.all_xs, result.all_task_ids, result.needed_probs)
             return None
         else:
             request.x = result.all_xs

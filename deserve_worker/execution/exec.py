@@ -108,9 +108,14 @@ class BatchExec:
 
     def post_process(self, result: torch.Tensor) -> BatchResult:
         if self.layer_storage.need_sample:
-            ongoing_tokens, ongoing_datas, all_tokens, all_datas, done_datas = (
-                self.layer_storage.sample(result, self.task_datas)
-            )
+            (
+                ongoing_tokens,
+                ongoing_datas,
+                all_tokens,
+                all_datas,
+                done_datas,
+                needed_probs,
+            ) = self.layer_storage.sample(result, self.task_datas)
             if len(ongoing_tokens) == 0:
                 xs = torch.empty(0, dtype=torch.int, device=main_device)
             else:
@@ -121,6 +126,10 @@ class BatchExec:
                 torch.cat(all_tokens),
                 [task_data.task_id for task_data in all_datas],
                 [task_data.task_id for task_data in done_datas],
+                {
+                    task_data.task_id: needed_prob
+                    for task_data, needed_prob in needed_probs
+                },
             )
         else:
             return BatchResult(
@@ -129,6 +138,7 @@ class BatchExec:
                 result,
                 [task_data.task_id for task_data in self.task_datas],
                 [],
+                {},
             )
 
 
@@ -226,7 +236,7 @@ class SingleTrace:
     traces: dict[OpId, torch.Tensor]
     output2input: dict[OpId, list[OpId]]
 
-    def step(self) -> tuple[BatchResult, list[tuple[int, float]]]:
+    def step(self) -> BatchResult:
         with torch.inference_mode():
             forward_ctx = TraceForwardCtx.init_trace_forward_ctx(
                 self.task_datas,
@@ -237,9 +247,9 @@ class SingleTrace:
             result = self.layer_storage.forward(self.xs, forward_ctx).squeeze(dim=0)
             return self.post_process(result)
 
-    def post_process(self, result: torch.Tensor) -> tuple[BatchResult, list[tuple[int, float]]]:
+    def post_process(self, result: torch.Tensor) -> BatchResult:
         if self.layer_storage.need_sample:
-            _, _, all_tokens, all_datas, _ = self.layer_storage.sample(
+            _, _, all_tokens, all_datas, _, needed_probs = self.layer_storage.sample(
                 result, self.task_datas
             )
             xs = torch.empty(0, dtype=torch.int, device=main_device)
@@ -249,7 +259,11 @@ class SingleTrace:
                 torch.cat(all_tokens),
                 [task_data.task_id for task_data in all_datas],
                 [task_data.task_id for task_data in all_datas],
-            ), self.layer_storage.calc_probs(result, self.task_datas)[0] # because we only serve one request in batch
+                {
+                    task_data.task_id: needed_prob
+                    for task_data, needed_prob in needed_probs
+                },
+            )  # because we only serve one request in batch
         else:
             return BatchResult(
                 result,
@@ -257,4 +271,5 @@ class SingleTrace:
                 result,
                 [task_data.task_id for task_data in self.task_datas],
                 [],
-            ), []
+                {},
+            )

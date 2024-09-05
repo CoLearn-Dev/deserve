@@ -15,10 +15,11 @@ class PlanStep(BaseModel):
 
 
 class SamplingParams(BaseModel):
-    temperature: float
-    top_p: float
+    temperature: float = 0.0
+    top_p: float = 1.0
     max_seq_len: int = 4096
     max_new_tokens: int = 4096
+    dump_probs_num: int = 0
 
 
 @dataclass

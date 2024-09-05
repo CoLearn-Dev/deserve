@@ -202,12 +202,14 @@ class LayerStorage:
         list[torch.Tensor],
         list[TaskData],
         list[TaskData],
+        list[tuple[TaskData, list[tuple[int, float]]]],
     ]:
         ongoing_tokens = []
         ongoing_datas = []
         all_tokens = []
         all_datas = []
         done_datas = []
+        needed_probs = []
         ptr = 0
         for task_data in task_datas:
             seqlen = task_data.seqlen
@@ -219,6 +221,18 @@ class LayerStorage:
                 probs = torch.softmax(h[-1] / sampling_params.temperature, dim=-1)
                 next_token = sample_top_p(probs, sampling_params.top_p).reshape(1)
             else:
+                if sampling_params.dump_probs_num > 0:
+                    probs = torch.softmax(h[-1], dim=-1)
+                    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+                    len = min(sampling_params.dump_probs_num, probs.shape[-1])
+                    needed_probs.append(
+                        (
+                            task_data,
+                            list(
+                                zip(probs_idx[:len].tolist(), probs_sort[:len].tolist())
+                            ),
+                        )
+                    )
                 next_token = torch.argmax(h[-1], dim=-1).reshape(1)
             next_token = next_token.to("cpu")
             if next_token[0] not in STOP_TOKEN_IDS and (
@@ -233,21 +247,11 @@ class LayerStorage:
             else:
                 ongoing_datas.append(task_data)
                 ongoing_tokens.append(next_token)
-        return ongoing_tokens, ongoing_datas, all_tokens, all_datas, done_datas
-
-    def calc_probs(
-        self, merged_h: torch.Tensor, task_datas: list[TaskData]
-    ) -> list[list[tuple[int, float]]]:
-        results = []
-        ptr = 0
-        for task_data in task_datas:
-            seqlen = task_data.seqlen
-            h = merged_h[ptr : ptr + seqlen]
-            ptr += seqlen
-            probs = torch.softmax(
-                h[-1],
-                dim=-1,
-            )
-            probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
-            results.append(list(zip(probs_idx[:10].tolist(), probs_sort[:10].tolist())))
-        return results
+        return (
+            ongoing_tokens,
+            ongoing_datas,
+            all_tokens,
+            all_datas,
+            done_datas,
+            needed_probs,
+        )

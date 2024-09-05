@@ -8,6 +8,7 @@ from safetensors.torch import load
 from transformers import AutoTokenizer  # type: ignore
 
 from deserve_client.model import CheckCtx, Transformer, VerifyCtx, llama_3_8b_args
+from deserve_controller.controller_api import Generation
 from deserve_worker.trace import OpId
 
 cli = typer.Typer()
@@ -40,9 +41,15 @@ def complete(
         typer.echo("Error")
         return
 
-    for chunk in response.iter_content():
+    for chunk in response.iter_content(chunk_size=None):
         if chunk:
-            print(chunk.decode("utf-8"), end="", flush=True)
+            generation: Generation = pickle.loads(chunk)
+            if generation.probs is not None:
+                for token, prob in generation.probs:
+                    print(f"{token}: {prob}", flush=True)
+                print()
+            else:
+                print(generation.token, end="", flush=True)
 
 
 @cli.command()

@@ -336,23 +336,22 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
 
-        x_inter = x.to(ctx.intermediate_dtype)
         xq = (
-            (x_inter @ self.wq.weight.T.to(ctx.intermediate_dtype))
+            (x.to(ctx.intermediate_dtype) @ self.wq.weight.T.to(ctx.intermediate_dtype))
             .view(bsz, seqlen, self.n_local_heads, self.head_dim)
             .to(ctx.result_dtype)
         )
         ctx.trace(self.component_id.with_op("xq"), xq)
 
         xk = (
-            (x_inter @ self.wk.weight.T.to(ctx.intermediate_dtype))
+            (x.to(ctx.intermediate_dtype) @ self.wk.weight.T.to(ctx.intermediate_dtype))
             .view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             .to(ctx.result_dtype)
         )
         ctx.trace(self.component_id.with_op("xk"), xk)
 
         xv = (
-            (x_inter @ self.wv.weight.T.to(ctx.intermediate_dtype))
+            (x.to(ctx.intermediate_dtype) @ self.wv.weight.T.to(ctx.intermediate_dtype))
             .view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             .to(ctx.result_dtype)
         )
@@ -382,8 +381,10 @@ class Attention(nn.Module):
             xq.to(ctx.intermediate_dtype),
             keys.transpose(2, 3).to(ctx.intermediate_dtype),
         ).to(ctx.result_dtype) / math.sqrt(self.head_dim)
+        ctx.trace(self.component_id.with_op("scores_prev"), scores)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+        ctx.trace(self.component_id.with_op("scores_mask"), scores)
         scores = F.softmax(scores.to(ctx.intermediate_dtype), dim=-1).to(
             ctx.result_dtype
         )
@@ -707,7 +708,9 @@ class Transformer(nn.Module):
             params.dim,
         )
         self.tok_embeddings.load_state_dict(
-            torch.load(cache_dir + "tok_embeddings.pt", map_location="cpu")
+            torch.load(
+                cache_dir + "tok_embeddings.pt", map_location="cpu", weights_only=True
+            )
         )
         self.tok_embeddings.to(device)
 
@@ -727,7 +730,9 @@ class Transformer(nn.Module):
         self.norm = RMSNorm(
             ComponentId(layer="norm", component="main"), params.dim, eps=params.norm_eps
         )
-        self.norm.load_state_dict(torch.load(cache_dir + "norm.pt", map_location="cpu"))
+        self.norm.load_state_dict(
+            torch.load(cache_dir + "norm.pt", map_location="cpu", weights_only=True)
+        )
         self.norm.to(device)
         self.output = torch.nn.utils.skip_init(  # type: ignore
             TraceLinear,
@@ -736,7 +741,7 @@ class Transformer(nn.Module):
             params.vocab_size,
         )
         self.output.load_state_dict(
-            torch.load(cache_dir + "output.pt", map_location="cpu")
+            torch.load(cache_dir + "output.pt", map_location="cpu", weights_only=True)
         )
         self.output.to(device)
 
@@ -961,12 +966,11 @@ async def trace(request: ChatRequest) -> Response:
         dim=-1,
     ).to(result_dtype)
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    probs_map = {i: p for i, p in zip(probs_idx.tolist(), probs_sort.tolist())}
 
     str_traces = {str(k): v.cpu() for k, v in traces.items()}
     return Response(
-        content=dumps(
-            str_traces, {"probs": probs_sort.tolist(), "probs_idx": probs_idx.tolist()}
-        ),
+        content=dumps(str_traces, {"probs": probs_map}),
         media_type="application/octet-stream",
     )
 

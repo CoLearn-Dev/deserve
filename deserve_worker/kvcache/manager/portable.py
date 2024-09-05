@@ -57,4 +57,4 @@ class PortableKVCacheManager:
         )
 
     def synchronize(self) -> None:
-        self.stream.synchronize()
+        self.stream.synchronize()  # type: ignore
