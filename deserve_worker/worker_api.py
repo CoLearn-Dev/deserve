@@ -106,6 +106,9 @@ async def trace(request: Request) -> None:
     tensors, metadata = loads(body)
     task_id = metadata["task_id"]
     sampling_params = SamplingParams.model_validate(metadata["sampling_params"])
+    sampling_params.dump_probs_num = (
+        -1
+    )  # override dump_probs_num to -1 for full tracing
     llm_engine.add_request(
         TraceRequest(
             x=tensors["x"].to(main_device),

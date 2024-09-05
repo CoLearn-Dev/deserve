@@ -14,7 +14,6 @@ from deserve_worker.trace import OpId
 cli = typer.Typer()
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 main_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-transformer = Transformer(llama_3_8b_args, main_device)
 
 
 def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
@@ -53,7 +52,9 @@ def complete(
 
 
 @cli.command()
-def trace(model: str, prompt: str, entry_point: str = "http://localhost:19000") -> None:
+def trace(
+    model: str, prompt: str, dump_path: str, entry_point: str = "http://localhost:19000"
+) -> None:
     response = requests.post(
         f"{entry_point}/trace_complete",
         json={"model": model, "prompt": prompt},
@@ -71,8 +72,10 @@ def trace(model: str, prompt: str, entry_point: str = "http://localhost:19000") 
             if "token" in metadata:
                 next_token = metadata["token"]
             tensors.update(temp_tensors)
-    print(next_token)
-    print(list(tensors.keys()))
+    print("Next token:", next_token)
+    with open(dump_path, "wb") as f:
+        pickle.dump((next_token, metadata["probs"], tensors), f)
+    print("Dumped (next_token, probs, tensors) to", dump_path)
 
 
 @cli.command()
@@ -97,6 +100,7 @@ def verify(
     diffs: dict[OpId, float] = {}
     tokens = tokenizer(prompt, return_tensors="pt")["input_ids"].to(main_device)
     dtype = torch.float16
+    transformer = Transformer(llama_3_8b_args, main_device)
     transformer.check(tokens, CheckCtx(dtype, dtype, traces, diffs, main_device))
     for op_id, diff in diffs.items():
         if diff > 0.03:

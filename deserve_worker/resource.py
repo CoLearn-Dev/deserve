@@ -71,4 +71,4 @@ class ResourceCollector:
         print("CPU count:", self.cpu_count)
         print(f"GPU memory: {self.gpu_mem / 1024 / 1024 / 1024:.2f} GB")
         print("Precision:", self.precision)
-        print("Maximum number of layers served for Llama-3-70b:", self.get_num_layer())
+        print("Maximum number of layers served:", self.get_num_layer())

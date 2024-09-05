@@ -7,66 +7,12 @@ pip install -e deserve_worker --extra-index-url https://flashinfer.ai/whl/cu124/
 
 ## How to run
 
-```bash 
-python3 -m deserve_worker.worker_api --batch-size BATCH_SIZE --port PORT --controller-url CONTROLLER_URL id
-```
-
-For example,
+For example, for a pipeline with 2 workers:
 
 ```bash 
-python3 -m deserve_worker.worker_api --batch-size 48 --port 8080 worker0
+python3 -m deserve_worker.worker_api --model=llama-3-70b --num-rounds=2 --layer-begin=emb --layer-end=40 --batch-size=48 --port=8080 --controller-url=http://localhost:19000 --next-worker-url=http://localhost:8081
 ```
 
-## API
-
-### Inference
-
-To inference, you need to pass a plan and other metadata in the request body. You have to send it to the first worker. The plan is a list of workers with their layers. The first worker will send the request to the next worker in the plan. The last worker will return the token to the controller. Here is an example: 
-
-```python
-plan = [
-    {
-        "worker_id": worker_id0,
-        "worker_url": "http://localhost:8080",
-        "layers": [
-            "llama-3-8b-instruct-slice/tok_embeddings",
-            *[f"llama-3-8b-instruct-slice/layers.{i}" for i in range(0, 16)],
-        ],
-    },
-    {
-        "worker_id": worker_id1,
-        "worker_url": "http://localhost:8081",
-        "layers": [
-            *[f"llama-3-8b-instruct-slice/layers.{i}" for i in range(16, 32)],
-            "llama-3-8b-instruct-slice/norm",
-            "llama-3-8b-instruct-slice/output",
-        ],
-    },
-]
-
-metadata = {
-    "task_id": task_id,
-    "round": 0,
-    "plan": plan,
-    "sampling_params": {
-        "temperature": 0.0,
-        "top_p": 1.0,
-        "max_total_len": 2048,
-    },
-}
-
-tensors = {"x": tokens}
-
-requests.post(
-    "http://localhost:8080/forward", data=dumps(tensors, metadata)
-)
+```bash 
+python3 -m deserve_worker.worker_api --model=llama-3-70b --num-rounds=2 --layer-begin=40 --layer-end=output --batch-size=48 --port=8081 --controller-url=http://localhost:19000 --next-worker-url=http://localhost:8080
 ```
-
-### Trace 
-
-To trace, the plan is also required. It is worth noting that trace use different kernel for computation and dumping.
-
-
-### Cancel
-
-You should not cancel a task. It's used for freeing resources like KV caches. 
