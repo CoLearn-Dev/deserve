@@ -7,7 +7,7 @@ Firstly, install DeServe:
 ```
 git clone git@github.com:CoLearn-Dev/deserve.git
 cd deserve 
-pip install -e deserve_worker --extra-index-url https://flashinfer.ai/whl/cu124/torch2.4/
+pip install -e deserve_worker --extra-index-url https://flashinfer.ai/whl/cu121/torch2.3/
 pip install -e deserve_controller
 pip install -e deserve_client
 ```
@@ -26,7 +26,7 @@ You could observe the basic resources information after the worker is started.
 
 Then, setup the controller: 
 ```
-python3 -m deserve_controller.controller 
+python3 -m deserve_controller.controller_api
 ```
 
 ### Run

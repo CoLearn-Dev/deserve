@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from safetensors.torch import load, save
 from transformers import AutoTokenizer  # type: ignore
 
+from deserve_worker.task import SamplingParams
+
 controller_url: str
 app = FastAPI()
 logger = logging.getLogger("uvicorn")
@@ -114,12 +116,14 @@ def relay_tokens(
 class CompleteRequest(BaseModel):
     model: str
     prompt: str
+    sampling_params: SamplingParams
 
 
 @app.post("/complete")
 def complete(request: CompleteRequest) -> StreamingResponse:
     model = request.model
     prompt = request.prompt
+    sampling_params = request.sampling_params
 
     if model not in model2layers:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -135,12 +139,7 @@ def complete(request: CompleteRequest) -> StreamingResponse:
     tensors = {"x": tokens}
     metadata = {
         "task_id": task_id,
-        "sampling_params": {
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "max_seq_len": 2048,
-            "dump_probs_num": 10,
-        },
+        "sampling_params": sampling_params,
     }
     first_worker_url = list(leaders.keys())[0]
     response = requests.post(
@@ -209,6 +208,7 @@ def relay_traces(
 def trace_complete(request: CompleteRequest) -> Response:
     model = request.model
     prompt = request.prompt
+    sampling_params = request.sampling_params
 
     if model not in model2layers:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -228,16 +228,11 @@ def trace_complete(request: CompleteRequest) -> Response:
     # generate request
     tokens = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
     online_workers = list(leaders.keys())
-    # plan = generate_plan(model, online_workers)
     tensors = {"x": tokens}
+    sampling_params.dump_probs_num = -1  # override
     metadata = {
         "task_id": task_id,
-        "sampling_params": {
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "max_seq_len": 2048,
-            "dump_probs_num": -1,
-        },
+        "sampling_params": sampling_params,
     }
     first_worker_url = online_workers[0]
     response = requests.post(f"{first_worker_url}/trace", data=dumps(tensors, metadata))
@@ -299,6 +294,10 @@ def update_tasks(requests: list[UpdateTaskRequest]) -> None:
     for request in requests:
         task_id = request.task_id
         token_id = request.output_token
+        if token_id in STOP_TOKEN_IDS:
+            end = True
+        else:
+            end = False
         token = tokenizer.decode(token_id)
         if request.needed_probs is not None:
             probs = [(tokenizer.decode(token), p) for token, p in request.needed_probs]
@@ -306,6 +305,8 @@ def update_tasks(requests: list[UpdateTaskRequest]) -> None:
             probs = None
         if task_id in token_channels:
             token_channels[task_id].put(Generation(token=token, probs=probs))
+            if end:
+                token_channels[task_id].put(None)
         else:
             logger.warning(f"Task {task_id} not found")
 

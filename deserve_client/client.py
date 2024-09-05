@@ -29,11 +29,23 @@ def loads(b: bytes) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
 
 @cli.command()
 def complete(
-    model: str, prompt: str, entry_point: str = "http://localhost:19000"
+    model: str,
+    prompt: str,
+    dump_probs_num: int = 0,
+    entry_point: str = "http://localhost:19000",
 ) -> None:
     response = requests.post(
         f"{entry_point}/complete",
-        json={"model": model, "prompt": prompt},
+        json={
+            "model": model,
+            "prompt": prompt,
+            "sampling_params": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_seq_len": 2048,
+                "dump_probs_num": dump_probs_num,
+            },
+        },
         stream=True,
     )
     if response.status_code != 200:
@@ -57,7 +69,16 @@ def trace(
 ) -> None:
     response = requests.post(
         f"{entry_point}/trace_complete",
-        json={"model": model, "prompt": prompt},
+        json={
+            "model": model,
+            "prompt": prompt,
+            "sampling_params": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_seq_len": 2048,
+                "dump_probs_num": -1,
+            },
+        },
         stream=True,
     )
     if response.status_code != 200:
