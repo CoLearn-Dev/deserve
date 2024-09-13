@@ -1,5 +1,6 @@
+import time
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence, cast
 
 import torch
 from flashinfer import (  # type: ignore
@@ -148,6 +149,8 @@ class BatchDecode(BatchExec):
     The tensor is stored in ragged format.
     """
 
+    decode_ctx: Optional[FlashDecodeCtx] = None
+
     @staticmethod
     def merge(decodes: Sequence["BatchExec"]) -> "BatchDecode":
         exec = BatchExec.merge(decodes)
@@ -168,22 +171,26 @@ class BatchDecode(BatchExec):
             result.xs, result.layer_storage, result.task_datas, result.kvcaches
         )
 
-    def step(self) -> BatchResult:
+    def prepare(self) -> None:
         with torch.inference_mode():
-            decode_ctx = FlashDecodeCtx.init_paged_decode_ctx(
+            self.decode_ctx = FlashDecodeCtx.init_paged_decode_ctx(
                 self.task_datas, self.kvcaches, decode_wrapper
             )
             model_args = self.layer_storage.model_args
             decode_wrapper.begin_forward(
-                indptr=decode_ctx.kv_page_indptr,
-                indices=decode_ctx.kv_page_indices,
-                last_page_len=decode_ctx.kv_last_page_lens,
+                indptr=self.decode_ctx.kv_page_indptr,
+                indices=self.decode_ctx.kv_page_indices,
+                last_page_len=self.decode_ctx.kv_last_page_lens,
                 num_qo_heads=model_args.n_heads,
                 num_kv_heads=model_args.n_kv_heads,
                 head_dim=model_args.dim // model_args.n_heads,
                 page_size=model_args.page_size,
             )
-            result = self.layer_storage.forward(self.xs, decode_ctx)
+
+    def step(self) -> BatchResult:
+        with torch.inference_mode():
+            assert self.decode_ctx is not None
+            result = self.layer_storage.forward(self.xs, self.decode_ctx)
             decode_wrapper.end_forward()
             return self.post_process(result)
 
@@ -205,25 +212,29 @@ class BatchPrefill(BatchExec):
             result.xs, result.layer_storage, result.task_datas, result.kvcaches
         )
 
-    def step(self) -> BatchResult:
+    def prepare(self) -> None:
         with torch.inference_mode():
-            prefill_ctx = FlashPrefillCtx.init_paged_prefill_ctx(
+            self.prefill_ctx = FlashPrefillCtx.init_paged_prefill_ctx(
                 self.task_datas,
                 self.kvcaches,
                 prefill_wrapper,
             )
             model_args = self.layer_storage.model_args
             prefill_wrapper.begin_forward(
-                qo_indptr=prefill_ctx.indptr,
-                paged_kv_indptr=prefill_ctx.kv_page_indptr,
-                paged_kv_indices=prefill_ctx.kv_page_indices,
-                paged_kv_last_page_len=prefill_ctx.kv_last_page_lens,
+                qo_indptr=self.prefill_ctx.indptr,
+                paged_kv_indptr=self.prefill_ctx.kv_page_indptr,
+                paged_kv_indices=self.prefill_ctx.kv_page_indices,
+                paged_kv_last_page_len=self.prefill_ctx.kv_last_page_lens,
                 num_qo_heads=model_args.n_heads,
                 num_kv_heads=model_args.n_kv_heads,
                 head_dim=model_args.dim // model_args.n_heads,
                 page_size=model_args.page_size,
             )
-            result = self.layer_storage.forward(self.xs, prefill_ctx)
+
+    def step(self) -> BatchResult:
+        with torch.inference_mode():
+            assert self.prefill_ctx is not None
+            result = self.layer_storage.forward(self.xs, self.prefill_ctx)
             prefill_wrapper.end_forward()
             return self.post_process(result)
 

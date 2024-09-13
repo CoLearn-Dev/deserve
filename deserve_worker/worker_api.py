@@ -7,11 +7,11 @@ import torch
 import uvicorn
 from fastapi import FastAPI, Request
 
-from deserve_worker.engine.processor import Processor
-from deserve_worker.engine.scheduler import Scheduler
+from deserve_worker.engine.pipeline.processor import PipelineProcessor
+from deserve_worker.engine.pipeline.scheduler import PipelineScheduler
 from deserve_worker.request import (
     DecodeRequest,
-    JoinRequest,
+    InitRequest,
     PrefillRequest,
     TraceRequest,
 )
@@ -32,7 +32,9 @@ llama3_8b_layers = [
     "llama-3-8b-instruct-slice/output",
 ]
 app = FastAPI()
-llm_engine: Processor
+llm_engine: PipelineProcessor
+reorder_buffer: dict[int, DecodeRequest] = {}
+current_round = 0
 
 
 def convert_name_to_id(name: str, max_layer: int) -> int:
@@ -55,7 +57,7 @@ async def prefill(request: Request) -> None:
     task_id = metadata["task_id"]
     sampling_params = SamplingParams.model_validate(metadata["sampling_params"])
     llm_engine.add_request(
-        PrefillRequest(
+        InitRequest(
             x=tensors["x"].to(main_device),
             task_id=task_id,
             sampling_params=sampling_params,
@@ -63,41 +65,49 @@ async def prefill(request: Request) -> None:
     )
 
 
-@app.post("/decode")
-async def decode(request: Request) -> None:
+@app.post("/step")
+async def step(request: Request) -> None:
     body = await request.body()
     tensors, metadata = loads(body)
     group_id = metadata["group_id"]
     exec_task_ids = metadata["exec_task_ids"]
-    offload_task_ids = metadata["offload_task_ids"]
-    reload_task_ids = metadata["reload_task_ids"]
     cancel_task_ids = metadata["cancel_task_ids"]
-    r2s_task_ids = metadata["r2s_task_ids"]
-    e2s_task_ids = metadata["e2s_task_ids"]
-    s2e_task_ids = metadata["s2e_task_ids"]
-    r2e_task_ids = metadata["r2e_task_ids"]
-    llm_engine.add_request(
-        DecodeRequest(
-            group_id=group_id,
+    resume_task_ids = metadata["resume_task_ids"]
+    suspend_task_ids = metadata["suspend_task_ids"]
+    llm_request: DecodeRequest
+    if "sampling_params" in metadata:
+        task_ids = metadata["task_ids"]
+        sampling_params = [
+            SamplingParams.model_validate(sp) for sp in metadata["sampling_params"]
+        ]
+        llm_request = PrefillRequest(
+            microbatch_id=group_id,
             xs=tensors["xs"].to(main_device),
             exec_task_ids=exec_task_ids,
-            offload_task_ids=offload_task_ids,
-            reload_task_ids=reload_task_ids,
             cancel_task_ids=cancel_task_ids,
-            r2s_task_ids=r2s_task_ids,
-            e2s_task_ids=e2s_task_ids,
-            s2e_task_ids=s2e_task_ids,
-            r2e_task_ids=r2e_task_ids,
+            reload_task_ids=resume_task_ids,
+            offload_task_ids=suspend_task_ids,
+            task_ids=task_ids,
+            sampling_params=sampling_params,
         )
-    )
-
-
-@app.post("/join")
-async def join(request: Request) -> None:
-    body = await request.body()
-    tensors, metadata = loads(body)
-    task_id = metadata["task_id"]
-    llm_engine.add_request(JoinRequest(x=tensors["x"].to(main_device), task_id=task_id))
+    else:
+        llm_request = DecodeRequest(
+            microbatch_id=group_id,
+            xs=tensors["xs"].to(main_device),
+            exec_task_ids=exec_task_ids,
+            cancel_task_ids=cancel_task_ids,
+            reload_task_ids=resume_task_ids,
+            offload_task_ids=suspend_task_ids,
+        )
+    global current_round
+    if llm_request.microbatch_id == current_round:
+        llm_engine.add_request(llm_request)
+        current_round = (current_round + 1) % llm_engine.num_rounds
+        while current_round in reorder_buffer:
+            llm_engine.add_request(reorder_buffer.pop(current_round))
+            current_round = (current_round + 1) % llm_engine.num_rounds
+    else:
+        reorder_buffer[llm_request.microbatch_id] = llm_request
 
 
 @app.post("/trace")
@@ -141,9 +151,10 @@ if __name__ == "__main__":
     print(f"Serve from {layers[layer_begin]} to {layers[layer_end - 1]}")
     worker_url = f"http://localhost:{args.port}"
     if layer_begin == 0:
-        llm_engine = Scheduler(
+        llm_engine = PipelineScheduler(
             args.num_rounds,
             9000,
+            1000,
             8,
             args.batch_size,
             layers[layer_begin:layer_end],
@@ -152,9 +163,10 @@ if __name__ == "__main__":
             worker_url=worker_url,
         )
     else:
-        llm_engine = Processor(
+        llm_engine = PipelineProcessor(
             args.num_rounds,
             9000,
+            1000,
             8,
             args.batch_size,
             layers[layer_begin:layer_end],
