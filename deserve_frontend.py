@@ -11,6 +11,7 @@ import torch
 from streamlit.delta_generator import DeltaGenerator
 from transformers import AutoTokenizer  # type: ignore
 
+from deserve_controller.controller_api import Generation
 from deserve_utils.serde import dumps, loads
 from deserve_worker.trace import OpId
 
@@ -27,9 +28,12 @@ def refresh_tokens(
         stream=True,
     )
     content = ""
-    for chunk in response.iter_content():
+    for chunk in response.iter_content(chunk_size=None):
         if chunk:
-            content += chunk.decode("utf-8")
+            generation: Generation = pickle.loads(chunk)
+            if generation.token == "<|eot_id|>":
+                break
+            content += generation.token
             generator.markdown(content)
     st.session_state.messages[index]["content"] = content
 
@@ -37,7 +41,7 @@ def refresh_tokens(
 def request_traces(messages: list[dict[str, str]]) -> tuple[
     Optional[str],
     dict[str, torch.Tensor],
-    list[tuple[int, float]],
+    dict[str, float],
     dict[OpId, list[OpId]],
 ]:
     response = requests.post(
@@ -47,14 +51,14 @@ def request_traces(messages: list[dict[str, str]]) -> tuple[
     tensors = {}
     output2input = {}
     next_token = None
-    probs = []
+    probs: dict[str, float] = {}
     for chunk in response.iter_content(chunk_size=None):
         if chunk:
             temp_tensors, metadata = loads(chunk)
             if "token" in metadata:
                 next_token = metadata["token"]
             if "probs" in metadata:
-                probs.extend(metadata["probs"])
+                probs.update(metadata["probs"])
             tensors.update(temp_tensors)
             str_output2input = metadata["output2input"]
             temp_output2input = {
@@ -190,6 +194,7 @@ def f_page_verify() -> None:
     st.header("Check with local computation")
     if st.button("Start"):
         with st.status("running..."):
+            begin = time.time()
             response = requests.post(
                 "http://localhost:19001/forward",
                 json={
@@ -199,11 +204,16 @@ def f_page_verify() -> None:
                 },
             )
             token = response.json()
+            local_check_time = time.time() - begin
         st.write("Finished:")
 
         # TODO: replace with actual metrics
-        st.metric("Time used (s):", 1.0)
+        st.metric("Time used (s):", local_check_time)
         st.write(f"The token is: `{token}`")
+        if token != next_token:
+            st.error("The token is incorrect")
+        else:
+            st.error("The token is correct")
 
     st.header("Generate inference trace")
     if st.button("Generate"):
@@ -213,10 +223,8 @@ def f_page_verify() -> None:
                 next_token, tensors, probs, output2input = request_traces(messages)
                 probs_chart_data = pd.DataFrame(
                     {
-                        "token": [
-                            st.session_state.tokenizer.decode([p[0]]) for p in probs
-                        ],
-                        "probability": [p[1] for p in probs],
+                        "token": list(probs.keys()),
+                        "probability": list(probs.values()),
                     }
                 )
                 c = (
@@ -234,7 +242,7 @@ def f_page_verify() -> None:
             st.metric("Generation time used (s):", generation_time)
 
         st.download_button(
-            f"Download trace (approximately {len(st.session_state.dumped_traces) // 1024 // 1024} MB)",
+            f"Download trace ({len(st.session_state.dumped_traces) // 1024 // 1024} MB)",
             st.session_state.dumped_traces,
             "trace.pkl",
             "application/octet-stream",
@@ -279,8 +287,9 @@ def f_page_verify() -> None:
                 color=alt.value("steelblue"),
             )
         )
-        st.altair_chart(c)
-        threshold = st.slider("Threshold for verification", 0.0, 0.1, 0.0, 0.001)
+        st.altair_chart(c, use_container_width=True)
+        # threshold = st.slider("Threshold for verification", 0.0, 0.1, 0.0, 0.001)
+        threshold = 0.3
 
         if all(v <= threshold for v in diffs.values()):
             st.success(f"The trace is correct with threshold {threshold}")

@@ -14,7 +14,7 @@ class LLMRequest(ABC):
 
 
 @dataclass
-class PrefillRequest(LLMRequest):
+class InitRequest(LLMRequest):
     x: torch.Tensor
     task_id: str
     sampling_params: SamplingParams
@@ -30,30 +30,22 @@ class PrefillRequest(LLMRequest):
 
 @dataclass
 class DecodeRequest(LLMRequest):
-    group_id: int
+    microbatch_id: int
     xs: torch.Tensor
     exec_task_ids: list[str]
     cancel_task_ids: list[str]
     offload_task_ids: list[str]
     reload_task_ids: list[str]
-    r2s_task_ids: list[str]
-    e2s_task_ids: list[str]
-    s2e_task_ids: list[str]
-    r2e_task_ids: list[str]
 
     @staticmethod
     def empty(group_id: int, dtype: torch.dtype) -> "DecodeRequest":
         return DecodeRequest(
-            group_id=group_id,
+            microbatch_id=group_id,
             xs=torch.empty((0,), dtype=dtype, device=main_device),
             exec_task_ids=[],
             cancel_task_ids=[],
             offload_task_ids=[],
             reload_task_ids=[],
-            r2s_task_ids=[],
-            e2s_task_ids=[],
-            s2e_task_ids=[],
-            r2e_task_ids=[],
         )
 
     def is_empty(self) -> bool:
@@ -63,13 +55,11 @@ class DecodeRequest(LLMRequest):
             and len(self.cancel_task_ids) == 0
             and len(self.offload_task_ids) == 0
             and len(self.reload_task_ids) == 0
-            and len(self.r2s_task_ids) == 0
-            and len(self.e2s_task_ids) == 0
-            and len(self.s2e_task_ids) == 0
-            and len(self.r2e_task_ids) == 0
         )
 
     def append_exec(self, task_id: str, x: torch.Tensor) -> None:
+        if x.numel() == 0:
+            assert False
         self.exec_task_ids.append(task_id)
         if self.xs.numel() == 0:
             self.xs = x
@@ -82,38 +72,56 @@ class DecodeRequest(LLMRequest):
     def refresh(self) -> None:
         self.offload_task_ids = []
         self.reload_task_ids = []
-        self.r2s_task_ids = []
-        self.e2s_task_ids = []
-        self.s2e_task_ids = []
-        self.r2e_task_ids = []
 
     def into_safetensors(self) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
         return {
             "xs": self.xs,
         }, {
-            "group_id": self.group_id,
+            "group_id": self.microbatch_id,
             "exec_task_ids": self.exec_task_ids,
-            "offload_task_ids": self.offload_task_ids,
-            "reload_task_ids": self.reload_task_ids,
             "cancel_task_ids": self.cancel_task_ids,
-            "r2s_task_ids": self.r2s_task_ids,
-            "e2s_task_ids": self.e2s_task_ids,
-            "s2e_task_ids": self.s2e_task_ids,
-            "r2e_task_ids": self.r2e_task_ids,
+            "suspend_task_ids": self.offload_task_ids,
+            "resume_task_ids": self.reload_task_ids,
         }
+
+    def into_decode_request(self) -> "DecodeRequest":
+        return DecodeRequest(
+            microbatch_id=self.microbatch_id,
+            xs=self.xs,
+            exec_task_ids=self.exec_task_ids,
+            cancel_task_ids=self.cancel_task_ids,
+            offload_task_ids=self.offload_task_ids,
+            reload_task_ids=self.reload_task_ids,
+        )
 
 
 @dataclass
-class JoinRequest(LLMRequest):
-    x: torch.Tensor
-    task_id: str
+class PrefillRequest(DecodeRequest):
+    task_ids: list[str]
+    sampling_params: list[SamplingParams]
 
     def into_safetensors(self) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-        return {
-            "x": self.x,
-        }, {
-            "task_id": self.task_id,
-        }
+        tensors, metadata = super().into_safetensors()
+        metadata["task_ids"] = self.task_ids
+        metadata["sampling_params"] = self.sampling_params
+        return tensors, metadata
+
+    @staticmethod
+    def from_decode_request(
+        decode_request: DecodeRequest,
+        task_ids: list[str],
+        sampling_params: list[SamplingParams],
+    ) -> "PrefillRequest":
+        return PrefillRequest(
+            microbatch_id=decode_request.microbatch_id,
+            xs=decode_request.xs,
+            exec_task_ids=decode_request.exec_task_ids,
+            cancel_task_ids=decode_request.cancel_task_ids,
+            offload_task_ids=decode_request.offload_task_ids,
+            reload_task_ids=decode_request.reload_task_ids,
+            task_ids=task_ids,
+            sampling_params=sampling_params,
+        )
 
 
 @dataclass

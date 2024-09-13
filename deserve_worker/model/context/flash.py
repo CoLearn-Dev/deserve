@@ -9,7 +9,7 @@ from flashinfer import (  # type: ignore
 
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import GpuPagePool
-from deserve_worker.model.args import ModelArgs
+from deserve_worker.kvcache.virtual import VirtualPagePool
 from deserve_worker.model.context.forward import PagedForwardCtx
 from deserve_worker.task import TaskData, main_device
 

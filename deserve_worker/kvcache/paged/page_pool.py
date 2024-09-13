@@ -38,7 +38,7 @@ class PagePool:
     def alloc(self, size: int) -> Optional[torch.Tensor]:
         with self.mutex:
             if size > self.num_avails:
-                raise ValueError("Not enough pages")
+                raise ValueError(f"Not enough pages {size} > {self.num_avails}")
                 return None
             self.num_avails -= size
             if size > self.page_buffer.shape[0]:

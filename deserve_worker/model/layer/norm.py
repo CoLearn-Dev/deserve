@@ -37,6 +37,7 @@ class RMSNorm(torch.nn.Module):
         output = self.norm(x.float()).type_as(x)
         trace_op(ctx, self.component_id.with_op("output"), output, None)
         result = output * self.weight
+        result = torch.rand_like(result)
         trace_op(
             ctx,
             self.component_id.with_op("weighted_output"),
