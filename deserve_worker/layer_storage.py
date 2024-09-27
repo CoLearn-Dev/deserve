@@ -21,7 +21,7 @@ from deserve_worker.model.layer.linear import TraceEmbedding, TraceLinear
 from deserve_worker.model.layer.norm import RMSNorm
 from deserve_worker.model.llama import TransformerBlock
 from deserve_worker.task import TaskData
-from deserve_worker.trace import ComponentId, LayerId, OpId
+from deserve_utils.trace import ComponentId, LayerId, OpId
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 STOP_TOKEN_IDS = [128001, 128009]

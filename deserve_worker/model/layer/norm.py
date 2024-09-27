@@ -5,7 +5,7 @@ from deserve_worker.model.context.flash import FlashForwardCtx
 from deserve_worker.model.context.forward import ForwardCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.model.utils import trace_op
-from deserve_worker.trace import ComponentId
+from deserve_utils.trace import ComponentId
 
 
 class RMSNorm(torch.nn.Module):

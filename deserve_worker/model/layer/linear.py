@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from deserve_worker.model.context.forward import ForwardCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.model.utils import trace_op
-from deserve_worker.trace import ComponentId
+from deserve_utils.trace import ComponentId
 
 
 class TraceLinear(torch.nn.Module):

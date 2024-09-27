@@ -13,7 +13,7 @@ from deserve_worker.model.context.flash import (
 from deserve_worker.model.context.forward import ForwardCtx, PagedForwardCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.model.utils import trace_op
-from deserve_worker.trace import ComponentId
+from deserve_utils.trace import ComponentId
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:

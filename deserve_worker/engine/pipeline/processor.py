@@ -27,7 +27,7 @@ from deserve_worker.request import (
 )
 from deserve_worker.resource import ResourceCollector
 from deserve_worker.task import TaskData, TaskManager, main_device, main_dtype
-from deserve_worker.trace import OpId
+from deserve_utils.trace import OpId
 
 
 class PipelineProcessor:
