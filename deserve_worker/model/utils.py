@@ -6,7 +6,7 @@ from safetensors.torch import load, save
 
 from deserve_worker.model.context.forward import ForwardCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
-from deserve_worker.trace import OpId
+from deserve_utils.trace import OpId
 
 
 def dumps(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> bytes:

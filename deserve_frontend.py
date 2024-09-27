@@ -13,7 +13,7 @@ from transformers import AutoTokenizer  # type: ignore
 
 from deserve_controller.controller_api import Generation
 from deserve_utils.serde import dumps, loads
-from deserve_worker.trace import OpId
+from deserve_utils.trace import OpId
 
 
 def refresh_tokens(

@@ -15,7 +15,7 @@ from deserve_worker.layer_storage import LayerStorage
 from deserve_worker.model.context.flash import FlashDecodeCtx, FlashPrefillCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.task import TaskData, main_device
-from deserve_worker.trace import OpId
+from deserve_utils.trace import OpId
 
 workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=main_device)
 decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(workspace_buffer)

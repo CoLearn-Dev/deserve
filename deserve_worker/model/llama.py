@@ -7,7 +7,7 @@ from deserve_worker.model.layer.attention import Attention
 from deserve_worker.model.layer.linear import FeedForward
 from deserve_worker.model.layer.norm import RMSNorm
 from deserve_worker.model.utils import trace_op
-from deserve_worker.trace import LayerId
+from deserve_utils.trace import LayerId
 
 
 class TransformerBlock(torch.nn.Module):

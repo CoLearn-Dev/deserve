@@ -6,7 +6,7 @@ from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool
 from deserve_worker.model.context.forward import ForwardCtx
 from deserve_worker.task import TaskData
-from deserve_worker.trace import OpId
+from deserve_utils.trace import OpId
 
 
 @dataclass

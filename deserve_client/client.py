@@ -7,9 +7,9 @@ import typer
 from safetensors.torch import load
 from transformers import AutoTokenizer  # type: ignore
 
-from deserve_client.model import CheckCtx, Transformer, VerifyCtx, llama_3_8b_args
+from deserve_client.llama import CheckCtx, Transformer, VerifyCtx, llama_3_8b_args
 from deserve_controller.controller_api import Generation
-from deserve_worker.trace import OpId
+from deserve_utils.trace import OpId
 
 cli = typer.Typer()
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
