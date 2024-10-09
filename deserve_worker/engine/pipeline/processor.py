@@ -8,6 +8,7 @@ from typing import Any, Optional, cast
 import requests
 import torch
 
+from deserve_utils.trace import OpId
 from deserve_worker.engine.microbatch.scheduler import MicroBatchScheduler
 from deserve_worker.execution.exec import BatchPrefill, SingleTrace
 from deserve_worker.kvcache.manager import KVCacheManager
@@ -27,7 +28,6 @@ from deserve_worker.request import (
 )
 from deserve_worker.resource import ResourceCollector
 from deserve_worker.task import TaskData, TaskManager, main_device, main_dtype
-from deserve_utils.trace import OpId
 
 
 class PipelineProcessor:
@@ -69,6 +69,7 @@ class PipelineProcessor:
         self.layer_manager = LayerManager(main_device)
         self.layer_storage = self.layer_manager.get_layer_storage(layers)
         self.model_args = get_model_args(layers[0].split("/")[0])
+        self.model_args.num_pages = num_pages_main + num_pages_swap * 2
         self.resource_collector = ResourceCollector(self.model_args)
         self.resource_collector.print_resources()
         self.microbatches = [
