@@ -130,11 +130,13 @@ class PipelineProcessor:
     def _post_request(
         self, url: str, tensors: dict[str, torch.Tensor], metadata: dict[str, Any]
     ) -> None:
+        begin = time.time()
         if self.simulated_latency > 0:
             default_stream = torch.cuda.Stream(device=main_device)  # type: ignore
             default_stream.synchronize()  # type: ignore
             time.sleep(self.simulated_latency)
         requests.post(url, data=dumps(tensors, metadata))
+        print(f"post: {(time.time() - begin) * 1000:.2f}ms")
 
     def send_request(self, request: LLMRequest) -> None:
         if isinstance(request, InitRequest):
