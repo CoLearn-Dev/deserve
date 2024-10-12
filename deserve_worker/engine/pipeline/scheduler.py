@@ -29,6 +29,7 @@ class PipelineScheduler(PipelineProcessor):
         worker_url: str,
         next_worker_url: str,
         controller_url: str,
+        simulated_latency: float,
     ) -> None:
         super().__init__(
             num_rounds,
@@ -40,6 +41,7 @@ class PipelineScheduler(PipelineProcessor):
             worker_url,
             next_worker_url,
             controller_url,
+            simulated_latency,
         )
         self.pending_prefill_datas: dict[str, tuple[torch.Tensor, SamplingParams]] = {}
         self.offloaded_decode_xs: dict[str, torch.Tensor] = {}

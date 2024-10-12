@@ -42,6 +42,7 @@ class PipelineProcessor:
         worker_url: str,
         next_worker_url: str,
         controller_url: str,
+        simulated_latency: float,
     ) -> None:
         self.num_rounds = num_rounds
         self.num_layers = sum(layer.count(".") for layer in layers)
@@ -86,6 +87,7 @@ class PipelineProcessor:
         self.controller_url = controller_url
         self.network_executor = ThreadPoolExecutor(max_workers=64)
         self.stream = torch.cuda.Stream(device=main_device)  # type: ignore
+        self.simulated_latency = simulated_latency
 
     def run(self) -> None:
         try:
@@ -125,6 +127,14 @@ class PipelineProcessor:
     def add_request(self, request: LLMRequest) -> None:
         self.queue.put(request)
 
+    def _post_request(
+        self, url: str, tensors: dict[str, torch.Tensor], metadata: dict[str, Any]
+    ) -> None:
+        default_stream = torch.cuda.Stream(device=main_device)  # type: ignore
+        default_stream.synchronize()  # type: ignore
+        time.sleep(self.simulated_latency)
+        requests.post(url, data=dumps(tensors, metadata))
+
     def send_request(self, request: LLMRequest) -> None:
         if isinstance(request, InitRequest):
             url = f"{self.next_worker_url}/init"
@@ -135,7 +145,7 @@ class PipelineProcessor:
         else:
             raise ValueError(f"Unknown request type: {request}")
         tensors, metadata = request.into_safetensors()
-        self.network_executor.submit(requests.post, url, data=dumps(tensors, metadata))
+        self.network_executor.submit(self._post_request, url, tensors, metadata)
 
     def send_result(
         self,
