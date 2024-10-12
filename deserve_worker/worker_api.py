@@ -140,6 +140,7 @@ if __name__ == "__main__":
     parser.add_argument("--next-worker-url", type=str)
     parser.add_argument("--num-main-pages", type=int)
     parser.add_argument("--num-swap-pages", type=int)
+    parser.add_argument("--simulated-latency", type=float)
     args = parser.parse_args()
 
     if args.model == "llama-3-70b":
@@ -163,6 +164,7 @@ if __name__ == "__main__":
             next_worker_url=args.next_worker_url,
             controller_url=args.controller_url,
             worker_url=worker_url,
+            simulated_latency=args.simulated_latency,
         )
     else:
         llm_engine = PipelineProcessor(
@@ -175,6 +177,7 @@ if __name__ == "__main__":
             next_worker_url=args.next_worker_url,
             controller_url=args.controller_url,
             worker_url=worker_url,
+            simulated_latency=args.simulated_latency,
         )
     threading.Thread(target=llm_engine.run, daemon=True).start()
     threading.Thread(target=llm_engine.heartbeat, daemon=True).start()
