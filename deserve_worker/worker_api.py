@@ -140,7 +140,7 @@ if __name__ == "__main__":
     parser.add_argument("--next-worker-url", type=str)
     parser.add_argument("--num-main-pages", type=int)
     parser.add_argument("--num-swap-pages", type=int)
-    parser.add_argument("--simulated-latency", type=float)
+    parser.add_argument("--simulated-latency", type=float, default=0.0)
     args = parser.parse_args()
 
     if args.model == "llama-3-70b":

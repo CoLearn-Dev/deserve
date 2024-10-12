@@ -130,9 +130,10 @@ class PipelineProcessor:
     def _post_request(
         self, url: str, tensors: dict[str, torch.Tensor], metadata: dict[str, Any]
     ) -> None:
-        default_stream = torch.cuda.Stream(device=main_device)  # type: ignore
-        default_stream.synchronize()  # type: ignore
-        time.sleep(self.simulated_latency)
+        if self.simulated_latency > 0:
+            default_stream = torch.cuda.Stream(device=main_device)  # type: ignore
+            default_stream.synchronize()  # type: ignore
+            time.sleep(self.simulated_latency)
         requests.post(url, data=dumps(tensors, metadata))
 
     def send_request(self, request: LLMRequest) -> None:
