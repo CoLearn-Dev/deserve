@@ -138,6 +138,8 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int)
     parser.add_argument("--controller-url", type=str)
     parser.add_argument("--next-worker-url", type=str)
+    parser.add_argument("--num-main-pages", type=int)
+    parser.add_argument("--num-swap-pages", type=int)
     args = parser.parse_args()
 
     if args.model == "llama-3-70b":
@@ -153,8 +155,8 @@ if __name__ == "__main__":
     if layer_begin == 0:
         llm_engine = PipelineScheduler(
             args.num_rounds,
-            9000,
-            1000,
+            args.num_main_pages,
+            args.num_swap_pages,
             8,
             args.batch_size,
             layers[layer_begin:layer_end],
@@ -165,8 +167,8 @@ if __name__ == "__main__":
     else:
         llm_engine = PipelineProcessor(
             args.num_rounds,
-            9000,
-            1000,
+            args.num_main_pages,
+            args.num_swap_pages,
             8,
             args.batch_size,
             layers[layer_begin:layer_end],
