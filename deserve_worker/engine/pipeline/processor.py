@@ -189,7 +189,8 @@ class PipelineProcessor:
     def process_step(self, request: DecodeRequest) -> DecodeRequest:
         begin = time.time()
         microbatch = self.microbatches[request.microbatch_id]
-        microbatch.adjust()
+        if self.num_rounds % 2 == 1:
+            microbatch.adjust()
         print(f"adjust: {(time.time() - begin) * 1000:.2f}ms")
         prev_microbatch = self.microbatches[
             (request.microbatch_id - 1 + self.num_rounds) % self.num_rounds
