@@ -152,6 +152,7 @@ if __name__ == "__main__":
     layer_begin = convert_name_to_id(args.layer_begin, len(layers))
     layer_end = convert_name_to_id(args.layer_end, len(layers))
     print(f"Serve from {layers[layer_begin]} to {layers[layer_end - 1]}")
+    print(f"Simulated latency: {args.simulated_latency * 1000}ms")
     worker_url = f"http://localhost:{args.port}"
     if layer_begin == 0:
         llm_engine = PipelineScheduler(
