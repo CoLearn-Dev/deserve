@@ -8,6 +8,7 @@ import requests
 import torch
 from tqdm import tqdm
 
+from deserve_utils.trace import ComponentId, LayerId, OpId
 from deserve_worker.model.args import (
     ModelArgs,
     llama_2_7b_args,
@@ -21,7 +22,6 @@ from deserve_worker.model.layer.linear import TraceEmbedding, TraceLinear
 from deserve_worker.model.layer.norm import RMSNorm
 from deserve_worker.model.llama import TransformerBlock
 from deserve_worker.task import TaskData
-from deserve_utils.trace import ComponentId, LayerId, OpId
 
 EOS_TOKEN_ID = 128001  # for llama 3 only
 STOP_TOKEN_IDS = [128001, 128009]
@@ -210,6 +210,8 @@ class LayerStorage:
         all_datas = []
         done_datas = []
         needed_probs = []
+
+        temp_tokens = torch.empty(0, device=self.main_device, dtype=torch.int32)
         ptr = 0
         for task_data in task_datas:
             seqlen = task_data.seqlen
@@ -217,7 +219,12 @@ class LayerStorage:
             ptr += seqlen
             sampling_params = task_data.sampling_params
             sampling_params.max_new_tokens -= 1
-            if sampling_params.temperature > 0:
+            if (
+                sampling_params.max_new_tokens <= 0
+                or task_data.start_pos >= sampling_params.max_seq_len
+            ):
+                next_token = torch.tensor([EOS_TOKEN_ID], device=self.main_device)
+            elif sampling_params.temperature > 0:
                 probs = torch.softmax(h[-1] / sampling_params.temperature, dim=-1)
                 next_token = sample_top_p(probs, sampling_params.top_p).reshape(1)
             else:
@@ -237,12 +244,11 @@ class LayerStorage:
                         )
                     )
                 next_token = torch.argmax(h[-1], dim=-1).reshape(1)
-            next_token = next_token.to("cpu")
-            if next_token[0] not in STOP_TOKEN_IDS and (
-                sampling_params.max_new_tokens <= 0
-                or task_data.start_pos >= sampling_params.max_seq_len
-            ):
-                next_token = torch.cat([next_token, torch.tensor([EOS_TOKEN_ID])])
+            temp_tokens = torch.cat([temp_tokens, next_token])
+
+        temp_tokens = temp_tokens.to("cpu")
+        for i, task_data in enumerate(task_datas):
+            next_token = temp_tokens[i : i + 1]
             all_datas.append(task_data)
             all_tokens.append(next_token)
             if next_token[-1] in STOP_TOKEN_IDS or sampling_params.max_new_tokens <= 0:
