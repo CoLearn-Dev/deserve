@@ -59,8 +59,9 @@ def profile_decode(
             sampling_params=sparam,
         )
         task_datas.append(task_data)
-        kvcaches.append(PagedKVCache.empty(gpu_page_pool))
-        prefill = BatchPrefill(prefill_input, layer_storage, task_datas, kvcaches)
+        kvcache = PagedKVCache.empty(gpu_page_pool)
+        kvcaches.append(kvcache)
+        prefill = BatchPrefill(prefill_input, layer_storage, [task_data], [kvcache])
         prefill.step()
         task_data.step()
     times = []
