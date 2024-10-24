@@ -94,6 +94,8 @@ class PipelineProcessor:
         self.staged_time_log: list[float] = []
         self.recv_bytes_log: int = 0
         self.send_bytes_log: int = 0
+        self.highest_upload_speed: float = 0
+        self.highest_download_speed: float = 0
         self.current_microbatch_id = 0
 
     def staged_print(self) -> None:
@@ -114,9 +116,11 @@ class PipelineProcessor:
         ) / self.num_rounds
         upload_speed = self.send_bytes_log / LOG_INTERVAL / 1024 / 1024
         download_speed = self.recv_bytes_log / LOG_INTERVAL / 1024 / 1024
+        self.highest_upload_speed = max(self.highest_upload_speed, upload_speed)
+        self.highest_download_speed = max(self.highest_download_speed, download_speed)
 
         print(
-            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Total batch size: {total_batch_size}; Avg stage time: {avg_stage_time}; Avg available pages: {avg_available_pages}; Upload speed: {upload_speed:.2f} MB/s; Download speed: {download_speed:.2f} MB/s"
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Total batch size: {total_batch_size}; Avg stage time: {avg_stage_time}; Avg available pages: {avg_available_pages}; Current upload speed: {upload_speed:.2f} MB/s; Current download speed: {download_speed:.2f} MB/s; Highest upload speed: {self.highest_upload_speed:.2f} MB/s; Highest download speed: {self.highest_download_speed:.2f} MB/s"
         )
 
         self.recv_bytes_log = 0
