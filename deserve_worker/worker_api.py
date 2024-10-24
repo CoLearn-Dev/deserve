@@ -182,4 +182,5 @@ if __name__ == "__main__":
         )
     threading.Thread(target=llm_engine.run, daemon=True).start()
     threading.Thread(target=llm_engine.heartbeat, daemon=True).start()
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    threading.Thread(target=llm_engine.log, daemon=True).start()
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")

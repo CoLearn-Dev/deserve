@@ -9,6 +9,7 @@ class CopiedPinnedMemory(PinnedMemory):
     def __init__(self, size: int, num_pages_swap: int, device: torch.device) -> None:
         super().__init__(size)
         self.bitmap = torch.ones((num_pages_swap,), device=device, dtype=torch.int8)
+        self.count = num_pages_swap
 
 
 class VirtualPagePool(GpuPagePool):
@@ -38,6 +39,7 @@ class VirtualPagePool(GpuPagePool):
         self.swap_bitmap = torch.ones(
             (num_pages_swap,), device=self.main_device, dtype=torch.bool
         )
+        self.swap_count = num_pages_swap
         self.num_avails = num_pages_main + num_pages_swap
         self.num_pages_main = num_pages_main
         self.num_pages_swap = num_pages_swap
@@ -62,15 +64,12 @@ class VirtualPagePool(GpuPagePool):
             self.page_bitmap[self.slices[off][0] : self.slices[off][1]] = (
                 self.swap_bitmap
             )
+            self.num_avails += self.swap_count
             self.swap_bitmap = self.page_bitmap[
                 self.slices[on][0] : self.slices[on][1]
             ].clone()
+            self.swap_count = remained
             self.page_bitmap[self.slices[on][0] : self.slices[on][1]] = False
-            more = (
-                self.page_bitmap[self.slices[off][0] : self.slices[off][1]].sum().item()
-            )
-            assert isinstance(more, int)
-            self.num_avails += more
             self.on = off
 
     def swap2(
@@ -78,7 +77,9 @@ class VirtualPagePool(GpuPagePool):
     ) -> None:
         off = 1 - self.on
         to_memory.bitmap = self.swap_bitmap
+        to_memory.count = self.swap_count
         self.swap_bitmap = from_memory.bitmap
+        self.swap_count = from_memory.count
         slice = self.slices[off]
         begin, middle, end = 0, self.num_layers // 2, self.num_layers
         interval = 1
