@@ -57,13 +57,12 @@ class PipelineScheduler(PipelineProcessor):
     def run(self) -> None:
         try:
             last_time = time.time()
-            last_sync = time.time()
             while True:
                 request = self.queue.get()
                 if request is None:
                     break
 
-                print(f"stage: {(time.time() - last_time) * 1000:.2f}ms")
+                self.staged_time_log.append(time.time() - last_time)
                 last_time = time.time()
                 next_request: Optional[LLMRequest] = None
                 if isinstance(request, InitRequest):
@@ -76,13 +75,11 @@ class PipelineScheduler(PipelineProcessor):
                     else:
                         self.clear_buffer()
                         self.synchronize()
-                        last_sync = time.time()
                         next_request = self.process_step(request)
                 elif isinstance(request, TraceRequest):
                     next_request = self.process_trace(request)
                 if next_request is not None:
                     self.send_request(next_request)
-                print(f"all: {(time.time() - last_sync) * 1000:.2f}ms")
         except Exception as e:
             traceback.print_exc()
 
@@ -103,9 +100,7 @@ class PipelineScheduler(PipelineProcessor):
         self.clear_buffer()
 
     def process_step(self, request: DecodeRequest) -> DecodeRequest:
-        begin = time.time()
         request = self.convert_step_request(request)
-        print(f"convert: {(time.time() - begin) * 1000:.2f}ms")
         return super().process_step(request)
 
     def convert_step_request(self, request: DecodeRequest) -> DecodeRequest:

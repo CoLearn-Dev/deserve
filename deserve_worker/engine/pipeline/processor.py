@@ -2,6 +2,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from queue import Queue
 from typing import Any, Optional, cast
 
@@ -28,6 +29,8 @@ from deserve_worker.request import (
 )
 from deserve_worker.resource import ResourceCollector
 from deserve_worker.task import TaskData, TaskManager, main_device, main_dtype
+
+LOG_INTERVAL = 5
 
 
 class PipelineProcessor:
@@ -88,24 +91,53 @@ class PipelineProcessor:
         self.network_executor = ThreadPoolExecutor(max_workers=64)
         self.stream = torch.cuda.Stream(device=main_device)  # type: ignore
         self.simulated_latency = simulated_latency
+        self.staged_time_log: list[float] = []
+        self.recv_bytes_log: int = 0
+        self.send_bytes_log: int = 0
+        self.current_microbatch_id = 0
+
+    def staged_print(self) -> None:
+        total_batch_size = sum(
+            len(microbatch.ongoing_paged_kvcaches) for microbatch in self.microbatches
+        )
+        if len(self.staged_time_log) > 0:
+            avg_stage_time = (
+                f"{sum(self.staged_time_log) / len(self.staged_time_log) * 1000:.2f}ms"
+            )
+        else:
+            avg_stage_time = "N/A"
+        avg_available_pages = (
+            self.kvcache_manager.virtual_page_pool.num_avails
+            - self.microbatches[self.current_microbatch_id].pinned_memory.count
+        ) + sum(
+            microbatch.pinned_memory.count for microbatch in self.microbatches
+        ) / self.num_rounds
+        upload_speed = self.send_bytes_log / LOG_INTERVAL / 1024 / 1024
+        download_speed = self.recv_bytes_log / LOG_INTERVAL / 1024 / 1024
+
+        print(
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Total batch size: {total_batch_size}; Avg stage time: {avg_stage_time}; Avg available pages: {avg_available_pages}; Upload speed: {upload_speed:.2f} MB/s; Download speed: {download_speed:.2f} MB/s"
+        )
+
+        self.recv_bytes_log = 0
+        self.send_bytes_log = 0
+        self.staged_time_log.clear()
 
     def run(self) -> None:
         try:
             last_time = time.time()
-            last_sync = time.time()
             while True:
                 request = self.queue.get()
                 if request is None:
                     break
 
-                print(f"stage: {(time.time() - last_time) * 1000:.2f}ms")
+                self.staged_time_log.append(time.time() - last_time)
                 last_time = time.time()
                 next_request: Optional[LLMRequest] = None
                 if isinstance(request, DecodeRequest) or isinstance(
                     request, PrefillRequest
                 ):
                     self.synchronize()
-                    last_sync = time.time()
                     if isinstance(request, PrefillRequest):
                         # here, we assume that we do not do batch prefill
                         self.task_manager.add(
@@ -120,22 +152,20 @@ class PipelineProcessor:
                     next_request = self.process_trace(request)
                 if next_request is not None:
                     self.send_request(next_request)
-                print(f"all: {(time.time() - last_sync) * 1000:.2f}ms")
         except Exception as e:
             traceback.print_exc()
 
     def add_request(self, request: LLMRequest) -> None:
         self.queue.put(request)
+        self.recv_bytes_log += request.get_tensors_size()
 
     def _post_request(
         self, url: str, tensors: dict[str, torch.Tensor], metadata: dict[str, Any]
     ) -> None:
-        begin = time.time()
         data = dumps(tensors, metadata)
         if self.simulated_latency > 0:
             time.sleep(self.simulated_latency)
         requests.post(url, data=data)
-        print(f"post: {(time.time() - begin) * 1000:.2f}ms")
 
     def send_request(self, request: LLMRequest) -> None:
         if isinstance(request, InitRequest):
@@ -148,6 +178,7 @@ class PipelineProcessor:
             raise ValueError(f"Unknown request type: {request}")
         tensors, metadata = request.into_safetensors()
         self.network_executor.submit(self._post_request, url, tensors, metadata)
+        self.send_bytes_log += request.get_tensors_size()
 
     def send_result(
         self,
@@ -191,19 +222,16 @@ class PipelineProcessor:
         self.network_executor.submit(requests.post, url, data=dumps(tensors, metadata))
 
     def synchronize(self) -> None:
-        begin = time.time()
         self.kvcache_manager.virtual_page_pool.stream.synchronize()  # type: ignore
         self.kvcache_manager.virtual_page_pool.stream2.synchronize()  # type: ignore
         self.kvcache_manager.virtual_page_pool.switch()
-        end = time.time()
-        print(f"synchronize: {(end - begin) * 1000:.2f}ms")
 
     def process_step(self, request: DecodeRequest) -> DecodeRequest:
-        begin = time.time()
         microbatch = self.microbatches[request.microbatch_id]
+        assert request.microbatch_id == self.current_microbatch_id
+        self.current_microbatch_id = (self.current_microbatch_id + 1) % self.num_rounds
         if self.num_rounds % 2 == 1:
             microbatch.adjust()
-        print(f"adjust: {(time.time() - begin) * 1000:.2f}ms")
         prev_microbatch = self.microbatches[
             (request.microbatch_id - 1 + self.num_rounds) % self.num_rounds
         ]
@@ -257,7 +285,6 @@ class PipelineProcessor:
             )
             if self.layer_storage.need_sample:
                 request.cancel_task_ids = []
-        print(f"prepare: {(time.time() - begin) * 1000:.2f}ms")
         return request
 
     def process_trace(self, request: TraceRequest) -> Optional[LLMRequest]:
@@ -304,3 +331,8 @@ class PipelineProcessor:
                 },
             )
             time.sleep(1)
+
+    def log(self) -> None:
+        while True:
+            time.sleep(LOG_INTERVAL)
+            self.staged_print()

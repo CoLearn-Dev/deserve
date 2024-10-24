@@ -12,6 +12,10 @@ class LLMRequest(ABC):
     def into_safetensors(self) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
         pass
 
+    @abstractmethod
+    def get_tensors_size(self) -> int:
+        pass
+
 
 @dataclass
 class InitRequest(LLMRequest):
@@ -26,6 +30,9 @@ class InitRequest(LLMRequest):
             "task_id": self.task_id,
             "sampling_params": self.sampling_params.model_dump(),
         }
+
+    def get_tensors_size(self) -> int:
+        return self.x.numel() * self.x.element_size()
 
 
 @dataclass
@@ -84,6 +91,9 @@ class DecodeRequest(LLMRequest):
             "resume_task_ids": self.reload_task_ids,
         }
 
+    def get_tensors_size(self) -> int:
+        return self.xs.numel() * self.xs.element_size()
+
     def into_decode_request(self) -> "DecodeRequest":
         return DecodeRequest(
             microbatch_id=self.microbatch_id,
@@ -137,3 +147,6 @@ class TraceRequest(LLMRequest):
             "task_id": self.task_id,
             "sampling_params": self.sampling_params.model_dump(),
         }
+
+    def get_tensors_size(self) -> int:
+        return self.x.numel() * self.x.element_size()
