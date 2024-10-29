@@ -8,6 +8,7 @@ from flashinfer import (  # type: ignore
     BatchPrefillWithPagedKVCacheWrapper,
 )
 
+from deserve_utils.trace import OpId
 from deserve_worker.execution.result import BatchResult
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import GpuPagePool
@@ -15,7 +16,6 @@ from deserve_worker.layer_storage import LayerStorage
 from deserve_worker.model.context.flash import FlashDecodeCtx, FlashPrefillCtx
 from deserve_worker.model.context.trace import TraceForwardCtx
 from deserve_worker.task import TaskData, main_device
-from deserve_utils.trace import OpId
 
 workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=main_device)
 decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(workspace_buffer)
@@ -118,13 +118,17 @@ class BatchExec:
                 needed_probs,
             ) = self.layer_storage.sample(result, self.task_datas)
             if len(ongoing_tokens) == 0:
-                xs = torch.empty(0, dtype=torch.int, device=main_device)
+                ongoing_xs = torch.empty(0, dtype=torch.int, device=main_device)
             else:
-                xs = torch.cat(ongoing_tokens)
+                ongoing_xs = torch.cat(ongoing_tokens)
+            if len(all_tokens) == 0:
+                all_xs = torch.empty(0, dtype=torch.int, device=main_device)
+            else:
+                all_xs = torch.cat(all_tokens)
             return BatchResult(
-                xs,
+                ongoing_xs,
                 [task_data.task_id for task_data in ongoing_datas],
-                torch.cat(all_tokens),
+                all_xs,
                 [task_data.task_id for task_data in all_datas],
                 [task_data.task_id for task_data in done_datas],
                 {

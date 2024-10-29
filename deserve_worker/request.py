@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -132,6 +132,85 @@ class PrefillRequest(DecodeRequest):
             task_ids=task_ids,
             sampling_params=sampling_params,
         )
+
+
+@dataclass
+class StepRequest(LLMRequest):
+    microbatch_id: int
+    xs: torch.Tensor
+    exec_task_ids: list[str]
+    exec_seqlens: list[int]
+    cancel_task_ids: list[str]
+    offload_task_ids: list[str]
+    reload_task_ids: list[str]
+    init_tasks: dict[str, tuple[int, SamplingParams]]
+
+    @staticmethod
+    def empty(group_id: int, dtype: torch.dtype) -> "StepRequest":
+        return StepRequest(
+            microbatch_id=group_id,
+            xs=torch.empty((0,), dtype=dtype, device=main_device),
+            exec_task_ids=[],
+            exec_seqlens=[],
+            cancel_task_ids=[],
+            offload_task_ids=[],
+            reload_task_ids=[],
+            init_tasks={},
+        )
+
+    def is_empty(self) -> bool:
+        return (
+            self.xs.numel() == 0
+            and len(self.exec_task_ids) == 0
+            and len(self.exec_seqlens) == 0
+            and len(self.cancel_task_ids) == 0
+            and len(self.offload_task_ids) == 0
+            and len(self.reload_task_ids) == 0
+            and len(self.init_tasks) == 0
+        )
+
+    def append_exec(
+        self,
+        task_id: str,
+        x: torch.Tensor,
+        init_info: Optional[tuple[int, SamplingParams]],
+    ) -> None:
+        if x.numel() == 0:
+            assert False
+        self.exec_task_ids.append(task_id)
+        self.exec_seqlens.append(x.shape[0])
+        if self.xs.numel() == 0:
+            self.xs = x
+        else:
+            self.xs = torch.cat([self.xs, x], dim=0)
+
+        if init_info is not None:
+            self.init_tasks[task_id] = init_info
+
+    def get_bsz(self) -> int:
+        return len(self.exec_task_ids)
+
+    def refresh(self) -> None:
+        self.offload_task_ids = []
+        self.reload_task_ids = []
+        self.exec_seqlens = [1] * len(self.exec_task_ids)  # must all be 1
+        self.init_tasks = {}
+
+    def into_safetensors(self) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        return {
+            "xs": self.xs,
+        }, {
+            "group_id": self.microbatch_id,
+            "exec_task_ids": self.exec_task_ids,
+            "exec_seqlens": self.exec_seqlens,
+            "cancel_task_ids": self.cancel_task_ids,
+            "offload_task_ids": self.offload_task_ids,
+            "reload_task_ids": self.reload_task_ids,
+            "init_tasks": self.init_tasks,
+        }
+
+    def get_tensors_size(self) -> int:
+        return self.xs.numel() * self.xs.element_size()
 
 
 @dataclass
