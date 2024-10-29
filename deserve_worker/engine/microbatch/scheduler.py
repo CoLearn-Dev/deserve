@@ -15,6 +15,8 @@ class MicroBatchScheduler(MicroBatchProcessor):
     ) -> None:
         super().__init__(kvcache_manager, task_data_manager, layer_storage)
         self.suspended_decode_xs: dict[str, torch.Tensor] = {}
+        self.pending_prefill_xs: dict[str, torch.Tensor] = {}
+        self.reserved_space = 0
 
     def suspend(self, task_ids: list[str], xs: torch.Tensor) -> None:
         # here, we assume seqlen = 1

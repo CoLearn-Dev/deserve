@@ -25,6 +25,7 @@ from deserve_worker.request import (
     InitRequest,
     LLMRequest,
     PrefillRequest,
+    StepRequest,
     TraceRequest,
 )
 from deserve_worker.resource import ResourceCollector
@@ -68,7 +69,7 @@ class PipelineProcessor:
             self.virtual_page_pool, self.cpu_page_pool
         )
         self.task_manager = TaskManager(num_pages_main + num_pages_swap, page_size)
-        self.offloaded_decode_kvcaches: dict[str, PagedKVCache[CpuPagePool]] = {}
+        self.offloaded_kvcaches: dict[str, PagedKVCache[CpuPagePool]] = {}
 
         self.layer_manager = LayerManager(main_device)
         self.layer_storage = self.layer_manager.get_layer_storage(layers)
@@ -138,18 +139,11 @@ class PipelineProcessor:
                 self.staged_time_log.append(time.time() - last_time)
                 last_time = time.time()
                 next_request: Optional[LLMRequest] = None
-                if isinstance(request, DecodeRequest) or isinstance(
-                    request, PrefillRequest
-                ):
+                if isinstance(request, StepRequest):
                     self.synchronize()
-                    if isinstance(request, PrefillRequest):
-                        # here, we assume that we do not do batch prefill
+                    for task_id, (initial_seqlen, sp) in request.init_tasks.items():
                         self.task_manager.add(
-                            TaskData.empty(
-                                request.task_ids[0],
-                                request.xs.shape[0],
-                                request.sampling_params[0],
-                            )
+                            TaskData.empty(task_id, initial_seqlen, sp)
                         )
                     next_request = self.process_step(request)
                 elif isinstance(request, TraceRequest):
@@ -174,7 +168,7 @@ class PipelineProcessor:
     def send_request(self, request: LLMRequest) -> None:
         if isinstance(request, InitRequest):
             url = f"{self.next_worker_url}/init"
-        elif isinstance(request, DecodeRequest) or isinstance(request, PrefillRequest):
+        elif isinstance(request, StepRequest):
             url = f"{self.next_worker_url}/step"
         elif isinstance(request, TraceRequest):
             url = f"{self.next_worker_url}/trace"
@@ -230,7 +224,7 @@ class PipelineProcessor:
         self.kvcache_manager.virtual_page_pool.stream2.synchronize()  # type: ignore
         self.kvcache_manager.virtual_page_pool.switch()
 
-    def process_step(self, request: DecodeRequest) -> DecodeRequest:
+    def process_step(self, request: StepRequest) -> StepRequest:
         microbatch = self.microbatches[request.microbatch_id]
         assert request.microbatch_id == self.current_microbatch_id
         self.current_microbatch_id = (self.current_microbatch_id + 1) % self.num_rounds
@@ -243,30 +237,60 @@ class PipelineProcessor:
             (request.microbatch_id + 1) % self.num_rounds
         ]
 
+        # init all sequence lengths
+        for task_id, seqlen in zip(request.exec_task_ids, request.exec_seqlens):
+            task_data = self.task_manager.get(task_id)
+            task_data.init(seqlen)
+
+        # print(f"exec_task_ids({len(request.exec_task_ids)})", request.exec_task_ids)
+        # print(
+        #     f"offloaded_task_ids({len(request.offload_task_ids) + len(self.offloaded_kvcaches)})",
+        #     request.offload_task_ids + list(self.offloaded_kvcaches.keys()),
+        # )
+        # print(
+        #     f"reload_task_ids({len(request.reload_task_ids)})", request.reload_task_ids
+        # )
+        # print(
+        #     f"offload_task_ids({len(request.offload_task_ids)})",
+        #     request.offload_task_ids,
+        # )
+        # print(
+        #     f"suspended_task_ids({len(microbatch.suspended_decode_xs)})",
+        #     list(microbatch.suspended_decode_xs.keys()),
+        # )
+        # print(
+        #     f"pending_prefill_task_ids({len(microbatch.pending_prefill_xs)})",
+        #     list(microbatch.pending_prefill_xs.keys()),
+        # )
+        # print(
+        #     f"ongoing_task_ids({len(microbatch.ongoing_paged_kvcaches)})",
+        #     list(microbatch.ongoing_paged_kvcaches.keys()),
+        # )
+
         # cancel
         microbatch.cancel(request.cancel_task_ids)
 
         # exec
-        cpu_kvcaches = microbatch.offload(request.offload_task_ids)
-        for task_id, cpu_kvcache in zip(request.offload_task_ids, cpu_kvcaches):
-            self.offloaded_decode_kvcaches[task_id] = cpu_kvcache
+        cpu_decode_kvcaches = microbatch.offload(request.offload_task_ids)
+        for task_id, cpu_decode_kvcache in zip(
+            request.offload_task_ids, cpu_decode_kvcaches
+        ):
+            self.offloaded_kvcaches[task_id] = cpu_decode_kvcache
 
         microbatch.reload(
             request.reload_task_ids,
             [
-                self.offloaded_decode_kvcaches.pop(task_id)
+                self.offloaded_kvcaches.pop(task_id)
                 for task_id in request.reload_task_ids
             ],
         )
 
         if len(request.exec_task_ids) > 0:
-            if isinstance(request, PrefillRequest):  # init
-                microbatch.join(request.task_ids)
+            microbatch.join(list(request.init_tasks.keys()))
 
             result = microbatch.step(
                 request.exec_task_ids,
                 request.xs,
-                isinstance(request, PrefillRequest),
                 prev_microbatch,
                 next_microbatch,
             )
@@ -275,7 +299,7 @@ class PipelineProcessor:
                     result.all_xs, result.all_task_ids, result.needed_probs
                 )
 
-            for task_id in result.ongoing_task_ids:
+            for task_id in request.exec_task_ids:
                 task_data = self.task_manager.get(task_id)
                 task_data.step()
 

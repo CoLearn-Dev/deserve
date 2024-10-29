@@ -27,11 +27,20 @@ class FlashForwardCtx(PagedForwardCtx):
         kvcaches: list[PagedKVCache[GpuPagePool]],
     ) -> "FlashForwardCtx":
         kv_last_page_lens = []
+        kvcache_list = []
         for task_data, kvcache in zip(task_datas, kvcaches):
-            total_len = task_data.start_pos + task_data.seqlen
+            # for chunk prefill, we preallocate the kvcache to the length of prompt
+            total_len = max(
+                task_data.start_pos + task_data.seqlen, task_data.initial_seqlen
+            )
+            current_len = task_data.start_pos + task_data.seqlen
+            page_table_len = (
+                current_len + kvcache.pool.page_size - 1
+            ) // kvcache.pool.page_size
+            page_table_remain = (current_len - 1) % kvcache.pool.page_size + 1
             kvcache.extend(total_len)
-            kv_last_page_lens.append((total_len - 1) % kvcache.pool.page_size + 1)
-        kvcache_list = [kvcache.page_table for kvcache in kvcaches]
+            kv_last_page_lens.append(page_table_remain)
+            kvcache_list.append(kvcache.page_table[:page_table_len])
 
         len_list = [0] + [kvcache.shape[0] for kvcache in kvcache_list]
         seqlens = [task_data.seqlen for task_data in task_datas]

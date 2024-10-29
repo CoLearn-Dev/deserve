@@ -103,13 +103,13 @@ class MicroBatchProcessor:
         self,
         task_ids: list[str],
         xs: torch.Tensor,
-        is_prefill: bool,
         prev_group: "MicroBatchProcessor",
         next_group: "MicroBatchProcessor",
     ) -> BatchResult:
         task_datas = [self.task_data_manager.get(task_id) for task_id in task_ids]
         kvcaches = [self.ongoing_paged_kvcaches[task_id] for task_id in task_ids]
-        if not is_prefill:
+        all_decode = all(task_data.seqlen == 1 for task_data in task_datas)
+        if all_decode:
             decode = BatchDecode(
                 xs,
                 self.layer_storage,

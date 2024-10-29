@@ -13,6 +13,7 @@ from deserve_worker.request import (
     DecodeRequest,
     InitRequest,
     PrefillRequest,
+    StepRequest,
     TraceRequest,
 )
 from deserve_worker.task import SamplingParams, main_device
@@ -33,7 +34,7 @@ llama3_8b_layers = [
 ]
 app = FastAPI()
 llm_engine: PipelineProcessor
-reorder_buffer: dict[int, DecodeRequest] = {}
+reorder_buffer: dict[int, StepRequest] = {}
 current_round = 0
 
 
@@ -71,34 +72,21 @@ async def step(request: Request) -> None:
     tensors, metadata = loads(body)
     group_id = metadata["group_id"]
     exec_task_ids = metadata["exec_task_ids"]
+    exec_seqlens = metadata["exec_seqlens"]
     cancel_task_ids = metadata["cancel_task_ids"]
-    resume_task_ids = metadata["resume_task_ids"]
-    suspend_task_ids = metadata["suspend_task_ids"]
-    llm_request: DecodeRequest
-    if "sampling_params" in metadata:
-        task_ids = metadata["task_ids"]
-        sampling_params = [
-            SamplingParams.model_validate(sp) for sp in metadata["sampling_params"]
-        ]
-        llm_request = PrefillRequest(
-            microbatch_id=group_id,
-            xs=tensors["xs"].to(main_device),
-            exec_task_ids=exec_task_ids,
-            cancel_task_ids=cancel_task_ids,
-            reload_task_ids=resume_task_ids,
-            offload_task_ids=suspend_task_ids,
-            task_ids=task_ids,
-            sampling_params=sampling_params,
-        )
-    else:
-        llm_request = DecodeRequest(
-            microbatch_id=group_id,
-            xs=tensors["xs"].to(main_device),
-            exec_task_ids=exec_task_ids,
-            cancel_task_ids=cancel_task_ids,
-            reload_task_ids=resume_task_ids,
-            offload_task_ids=suspend_task_ids,
-        )
+    offload_task_ids = metadata["offload_task_ids"]
+    reload_task_ids = metadata["reload_task_ids"]
+    init_tasks = metadata["init_tasks"]
+    llm_request = StepRequest(
+        microbatch_id=group_id,
+        xs=tensors["xs"].to(main_device),
+        exec_task_ids=exec_task_ids,
+        exec_seqlens=exec_seqlens,
+        cancel_task_ids=cancel_task_ids,
+        offload_task_ids=offload_task_ids,
+        reload_task_ids=reload_task_ids,
+        init_tasks=init_tasks,
+    )
     global current_round
     if llm_request.microbatch_id == current_round:
         llm_engine.add_request(llm_request)

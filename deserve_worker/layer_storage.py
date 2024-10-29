@@ -248,15 +248,19 @@ class LayerStorage:
 
         temp_tokens = temp_tokens.to("cpu")
         for i, task_data in enumerate(task_datas):
-            sampling_params = task_data.sampling_params
-            next_token = temp_tokens[i : i + 1]
-            all_datas.append(task_data)
-            all_tokens.append(next_token)
-            if next_token[-1] in STOP_TOKEN_IDS or sampling_params.max_new_tokens <= 0:
-                done_datas.append(task_data)
-            else:
-                ongoing_datas.append(task_data)
-                ongoing_tokens.append(next_token)
+            if task_data.finished_prefill():
+                sampling_params = task_data.sampling_params
+                next_token = temp_tokens[i : i + 1]
+                all_datas.append(task_data)
+                all_tokens.append(next_token)
+                if (
+                    next_token[-1] in STOP_TOKEN_IDS
+                    or sampling_params.max_new_tokens <= 0
+                ):
+                    done_datas.append(task_data)
+                else:
+                    ongoing_datas.append(task_data)
+                    ongoing_tokens.append(next_token)
         return (
             ongoing_tokens,
             ongoing_datas,
