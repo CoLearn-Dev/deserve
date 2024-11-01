@@ -56,7 +56,7 @@ def profile_decode(
     for i in range(bsz):
         task_data = TaskData.empty(
             task_id=f"{prefix}-{bsz}-{i}",
-            seqlen=prefix,
+            initial_seqlen=prefix,
             sampling_params=sparam,
         )
         task_datas.append(task_data)
