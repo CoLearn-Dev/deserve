@@ -88,14 +88,12 @@ if __name__ == "__main__":
     for i in range(bsz):
         task_data = TaskData.empty(
             task_id=f"{prefix}-{bsz}-{i}",
-            seqlen=prefix,
+            initial_seqlen=prefix,
             sampling_params=sparam,
         )
         task_manager.add(task_data)
         processor0.join([task_data.task_id])
-        processor0.step(
-            [task_data.task_id], prefill_input, True, processor1, processor1
-        )
+        processor0.step([task_data.task_id], prefill_input, processor1, processor1)
         task_data.step()
 
     times = []
@@ -107,7 +105,6 @@ if __name__ == "__main__":
         processor0.step(
             list(task_manager.task_datas.keys()),
             decode_input,
-            False,
             processor1,
             processor2,
         )

@@ -44,6 +44,7 @@ def profile_prefill(
                 start_pos=0,
                 round=0,
                 seqlen=prefix,
+                initial_seqlen=prefix,
                 sampling_params=sparam,
             )
             task_datas.append(task_data)
