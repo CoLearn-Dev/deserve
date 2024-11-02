@@ -14,17 +14,16 @@ class MicroBatchScheduler(MicroBatchProcessor):
         layer_storage: LayerStorage,
     ) -> None:
         super().__init__(kvcache_manager, task_data_manager, layer_storage)
-        self.suspended_decode_xs: dict[str, torch.Tensor] = {}
-        self.pending_prefill_xs: dict[str, torch.Tensor] = {}
-        self.reserved_space = 0
+        self.suspended_decodes: dict[str, torch.Tensor] = {}
+        self.suspended_prefills: dict[str, torch.Tensor] = {}
 
     def suspend(self, task_ids: list[str], xs: torch.Tensor) -> None:
         # here, we assume seqlen = 1
         for i, task_id in enumerate(task_ids):
-            self.suspended_decode_xs[task_id] = xs[i : i + 1]
+            self.suspended_decodes[task_id] = xs[i : i + 1]
 
     def resume(self, task_ids: list[str]) -> torch.Tensor:
         xs = torch.empty((0,), dtype=main_dtype, device=main_device)
         for task_id in task_ids:
-            xs = torch.cat([xs, self.suspended_decode_xs.pop(task_id)], dim=0)
+            xs = torch.cat([xs, self.suspended_decodes.pop(task_id)], dim=0)
         return xs

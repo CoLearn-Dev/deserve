@@ -225,6 +225,9 @@ class PipelineProcessor:
         self.kvcache_manager.virtual_page_pool.switch()
 
     def process_step(self, request: StepRequest) -> StepRequest:
+        print(
+            f"exec {len(request.exec_task_ids)}; offload {len(request.offload_task_ids)}; reload {len(request.reload_task_ids)}; cancel {len(request.cancel_task_ids)}"
+        )
         microbatch = self.microbatches[request.microbatch_id]
         assert request.microbatch_id == self.current_microbatch_id
         self.current_microbatch_id = (self.current_microbatch_id + 1) % self.num_rounds
@@ -241,31 +244,6 @@ class PipelineProcessor:
         for task_id, seqlen in zip(request.exec_task_ids, request.exec_seqlens):
             task_data = self.task_manager.get(task_id)
             task_data.init(seqlen)
-
-        # print(f"exec_task_ids({len(request.exec_task_ids)})", request.exec_task_ids)
-        # print(
-        #     f"offloaded_task_ids({len(request.offload_task_ids) + len(self.offloaded_kvcaches)})",
-        #     request.offload_task_ids + list(self.offloaded_kvcaches.keys()),
-        # )
-        # print(
-        #     f"reload_task_ids({len(request.reload_task_ids)})", request.reload_task_ids
-        # )
-        # print(
-        #     f"offload_task_ids({len(request.offload_task_ids)})",
-        #     request.offload_task_ids,
-        # )
-        # print(
-        #     f"suspended_task_ids({len(microbatch.suspended_decode_xs)})",
-        #     list(microbatch.suspended_decode_xs.keys()),
-        # )
-        # print(
-        #     f"pending_prefill_task_ids({len(microbatch.pending_prefill_xs)})",
-        #     list(microbatch.pending_prefill_xs.keys()),
-        # )
-        # print(
-        #     f"ongoing_task_ids({len(microbatch.ongoing_paged_kvcaches)})",
-        #     list(microbatch.ongoing_paged_kvcaches.keys()),
-        # )
 
         # cancel
         microbatch.cancel(request.cancel_task_ids)
@@ -313,6 +291,7 @@ class PipelineProcessor:
             )
             if self.layer_storage.need_sample:
                 request.cancel_task_ids = []
+        print("num_avails", self.kvcache_manager.virtual_page_pool.num_avails)
         return request
 
     def process_trace(self, request: TraceRequest) -> Optional[LLMRequest]:
