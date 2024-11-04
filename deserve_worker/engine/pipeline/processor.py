@@ -261,6 +261,7 @@ class PipelineProcessor:
                 for task_id in request.reload_task_ids
             ],
         )
+        microbatch.kvcache_manager.synchronize()
 
         if len(request.exec_task_ids) > 0:
             microbatch.join(list(request.init_tasks.keys()))
@@ -285,7 +286,7 @@ class PipelineProcessor:
             request.xs = result.ongoing_xs
             request.exec_task_ids = result.ongoing_task_ids
         else:
-            self.kvcache_manager.synchronize()  # for previous offloading and reloading
+            # self.kvcache_manager.synchronize()  # for previous offloading and reloading
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_microbatch.pinned_memory, prev_microbatch.pinned_memory
             )
