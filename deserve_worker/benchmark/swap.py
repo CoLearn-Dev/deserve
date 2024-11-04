@@ -6,6 +6,7 @@ import torch
 from deserve_worker.benchmark.utils import convert_name_to_id, layers
 from deserve_worker.engine.microbatch.processor import MicroBatchProcessor
 from deserve_worker.kvcache.manager import KVCacheManager
+from deserve_worker.kvcache.paged.chunk_pool import CpuChunkPool
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool
 from deserve_worker.kvcache.virtual import VirtualPagePool
 from deserve_worker.layer_storage import LayerManager
@@ -37,8 +38,8 @@ if __name__ == "__main__":
     virtual_page_pool = VirtualPagePool(
         num_layers, main, swap, 8, torch.device("cuda"), torch.float16
     )
-    cpu_page_pool = CpuPagePool(num_layers, main * 3, 8, torch.float16)
-    kvcache_manager = KVCacheManager(virtual_page_pool, cpu_page_pool)
+    cpu_chunk_pool = CpuChunkPool(num_layers, 512, 2048, 8, torch.float16)
+    kvcache_manager = KVCacheManager(virtual_page_pool, cpu_chunk_pool)
     task_manager = TaskManager(main, 8)
     processor0 = MicroBatchProcessor(
         kvcache_manager,

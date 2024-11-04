@@ -7,7 +7,11 @@ import torch
 
 from deserve_worker.engine.microbatch.scheduler import MicroBatchScheduler
 from deserve_worker.engine.pipeline.processor import PipelineProcessor
-from deserve_worker.engine.pipeline.stage.join import JoinStage
+from deserve_worker.engine.pipeline.stage import Stage
+from deserve_worker.engine.pipeline.stage.join import (
+    AgggregatedJoinStage,
+    VanillaJoinStage,
+)
 from deserve_worker.engine.pipeline.stage.swap import SwapStage
 from deserve_worker.request import InitRequest, LLMRequest, StepRequest, TraceRequest
 from deserve_worker.task import SamplingParams, TaskData, main_dtype
@@ -26,6 +30,7 @@ class PipelineScheduler(PipelineProcessor):
         next_worker_url: str,
         controller_url: str,
         simulated_latency: float,
+        enable_chunk_prefill: bool,
     ) -> None:
         super().__init__(
             num_rounds,
@@ -42,15 +47,27 @@ class PipelineScheduler(PipelineProcessor):
         self.pending_prefills: dict[str, tuple[torch.Tensor, SamplingParams]] = {}
         self.offloaded_decodes: dict[str, torch.Tensor] = {}
         self.offloaded_prefills: dict[str, torch.Tensor] = {}
-        self.join_stages: list[JoinStage] = [
-            JoinStage(
-                self.task_manager,
-                self.pending_prefills,
-                microbatch.suspended_prefills,
-                microbatch.suspended_decodes,
-            )
-            for microbatch in self.microbatches
-        ]
+        self.join_stages: list[Stage] = (
+            [
+                AgggregatedJoinStage(
+                    self.task_manager,
+                    self.pending_prefills,
+                    microbatch.suspended_prefills,
+                    microbatch.suspended_decodes,
+                    512,
+                )
+                for microbatch in self.microbatches
+            ]
+            if enable_chunk_prefill
+            else [
+                VanillaJoinStage(
+                    self.task_manager,
+                    self.pending_prefills,
+                    microbatch.suspended_decodes,
+                )
+                for microbatch in self.microbatches
+            ]
+        )
         self.swap_stages: list[SwapStage] = [
             SwapStage(
                 self.task_manager,
@@ -129,5 +146,4 @@ class PipelineScheduler(PipelineProcessor):
 
         rest_pages, request = join_stage.process(rest_pages, request)
         rest_pages, request = swap_stage.process(rest_pages, request)
-        print("rest_pages", rest_pages)
         return request

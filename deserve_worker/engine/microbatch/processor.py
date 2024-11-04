@@ -5,6 +5,7 @@ import torch
 from deserve_worker.execution.exec import BatchDecode, BatchPrefill
 from deserve_worker.execution.result import BatchResult
 from deserve_worker.kvcache.manager import KVCacheManager
+from deserve_worker.kvcache.paged.chunk_pool import ChunkHandle
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool, GpuPagePool
 from deserve_worker.kvcache.pinned.kvcache import PinnedKVCache
@@ -52,35 +53,33 @@ class MicroBatchProcessor:
             for paged_kvcache in self.ongoing_paged_kvcaches.values():
                 paged_kvcache.adjust(offset)
 
-    def offload(self, task_ids: list[str]) -> list[PagedKVCache[CpuPagePool]]:
+    def offload(self, task_ids: list[str]) -> list[ChunkHandle]:
         """
         Suspend the execution of the task in a blocking manner.
         """
         paged_kvcaches = [
             self.ongoing_paged_kvcaches.pop(task_id) for task_id in task_ids
         ]
-        cpu_paged_kvcaches = [
+        cpu_chunk_handles = [
             self.kvcache_manager.copy_gpu_to_cpu(paged_kvcache)
             for paged_kvcache in paged_kvcaches
         ]
         for paged_kvcache in paged_kvcaches:
             paged_kvcache.free()
-        return cpu_paged_kvcaches
+        return cpu_chunk_handles
 
-    def reload(
-        self, task_ids: list[str], cpu_paged_kvcaches: list[PagedKVCache[CpuPagePool]]
-    ) -> None:
+    def reload(self, task_ids: list[str], cpu_chunk_handles: list[ChunkHandle]) -> None:
         """
         Resume the execution of the task in a blocking manner.
         """
         gpu_paged_kvcaches = [
-            self.kvcache_manager.copy_cpu_to_gpu(cpu_paged_kvcache)
-            for cpu_paged_kvcache in cpu_paged_kvcaches
+            self.kvcache_manager.copy_cpu_to_gpu(cpu_chunk_handle)
+            for cpu_chunk_handle in cpu_chunk_handles
         ]
         for task_id, gpu_paged_kvcache in zip(task_ids, gpu_paged_kvcaches):
             self.ongoing_paged_kvcaches[task_id] = gpu_paged_kvcache
-        for cpu_paged_kvcache in cpu_paged_kvcaches:
-            cpu_paged_kvcache.free()
+        for cpu_chunk_handle in cpu_chunk_handles:
+            cpu_chunk_handle.free()
 
     def cancel(self, task_ids: list[str]) -> None:
         for task_id in task_ids:
@@ -117,6 +116,7 @@ class MicroBatchProcessor:
                 cast(list[PagedKVCache[GpuPagePool]], kvcaches),
             )
             decode.prepare()
+            self.kvcache_manager.synchronize()  # for previous offloading and reloading
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_group.pinned_memory, prev_group.pinned_memory
             )
@@ -129,6 +129,7 @@ class MicroBatchProcessor:
                 cast(list[PagedKVCache[GpuPagePool]], kvcaches),
             )
             prefill.prepare()
+            self.kvcache_manager.synchronize()  # for previous offloading and reloading
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_group.pinned_memory, prev_group.pinned_memory
             )
