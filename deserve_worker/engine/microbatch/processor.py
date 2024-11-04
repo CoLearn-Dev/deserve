@@ -116,7 +116,7 @@ class MicroBatchProcessor:
                 cast(list[PagedKVCache[GpuPagePool]], kvcaches),
             )
             decode.prepare()
-            self.kvcache_manager.synchronize()  # for previous offloading and reloading
+            # self.kvcache_manager.synchronize()  # for previous offloading and reloading
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_group.pinned_memory, prev_group.pinned_memory
             )
@@ -129,7 +129,7 @@ class MicroBatchProcessor:
                 cast(list[PagedKVCache[GpuPagePool]], kvcaches),
             )
             prefill.prepare()
-            self.kvcache_manager.synchronize()  # for previous offloading and reloading
+            # self.kvcache_manager.synchronize()  # for previous offloading and reloading
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_group.pinned_memory, prev_group.pinned_memory
             )
