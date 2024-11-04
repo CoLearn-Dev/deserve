@@ -13,6 +13,7 @@ from deserve_utils.trace import OpId
 from deserve_worker.engine.microbatch.scheduler import MicroBatchScheduler
 from deserve_worker.execution.exec import BatchPrefill, SingleTrace
 from deserve_worker.kvcache.manager import KVCacheManager
+from deserve_worker.kvcache.paged.chunk_pool import ChunkHandle, CpuChunkPool
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool, GpuPagePool
 from deserve_worker.kvcache.pinned.pinned_memory import PinnedMemory
@@ -51,9 +52,10 @@ class PipelineProcessor:
         self.num_rounds = num_rounds
         self.num_layers = sum(layer.count(".") for layer in layers)
         self.max_batch_size = batch_size
-        self.cpu_page_pool = CpuPagePool(
+        self.cpu_chunk_pool = CpuChunkPool(
             self.num_layers,
-            (num_pages_main + num_pages_swap * 2) * 8,
+            512,
+            320,
             page_size,
             main_dtype,
         )
@@ -66,10 +68,10 @@ class PipelineProcessor:
             main_dtype,
         )
         self.kvcache_manager = KVCacheManager(
-            self.virtual_page_pool, self.cpu_page_pool
+            self.virtual_page_pool, self.cpu_chunk_pool
         )
         self.task_manager = TaskManager(num_pages_main + num_pages_swap, page_size)
-        self.offloaded_kvcaches: dict[str, PagedKVCache[CpuPagePool]] = {}
+        self.offloaded_kvcaches: dict[str, ChunkHandle] = {}
 
         self.layer_manager = LayerManager(main_device)
         self.layer_storage = self.layer_manager.get_layer_storage(layers)
@@ -225,9 +227,6 @@ class PipelineProcessor:
         self.kvcache_manager.virtual_page_pool.switch()
 
     def process_step(self, request: StepRequest) -> StepRequest:
-        print(
-            f"exec {len(request.exec_task_ids)}; offload {len(request.offload_task_ids)}; reload {len(request.reload_task_ids)}; cancel {len(request.cancel_task_ids)}"
-        )
         microbatch = self.microbatches[request.microbatch_id]
         assert request.microbatch_id == self.current_microbatch_id
         self.current_microbatch_id = (self.current_microbatch_id + 1) % self.num_rounds
@@ -249,11 +248,11 @@ class PipelineProcessor:
         microbatch.cancel(request.cancel_task_ids)
 
         # exec
-        cpu_decode_kvcaches = microbatch.offload(request.offload_task_ids)
-        for task_id, cpu_decode_kvcache in zip(
-            request.offload_task_ids, cpu_decode_kvcaches
+        cpu_chunk_handles = microbatch.offload(request.offload_task_ids)
+        for task_id, cpu_chunk_handle in zip(
+            request.offload_task_ids, cpu_chunk_handles
         ):
-            self.offloaded_kvcaches[task_id] = cpu_decode_kvcache
+            self.offloaded_kvcaches[task_id] = cpu_chunk_handle
 
         microbatch.reload(
             request.reload_task_ids,
@@ -271,7 +270,7 @@ class PipelineProcessor:
                 request.xs,
                 prev_microbatch,
                 next_microbatch,
-            )
+            )  # synchronize for previous offloading and reloading inside
             if self.layer_storage.need_sample:
                 self.send_result(
                     result.all_xs, result.all_task_ids, result.needed_probs
@@ -286,12 +285,12 @@ class PipelineProcessor:
             request.xs = result.ongoing_xs
             request.exec_task_ids = result.ongoing_task_ids
         else:
+            self.kvcache_manager.synchronize()  # for previous offloading and reloading
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_microbatch.pinned_memory, prev_microbatch.pinned_memory
             )
             if self.layer_storage.need_sample:
                 request.cancel_task_ids = []
-        print("num_avails", self.kvcache_manager.virtual_page_pool.num_avails)
         return request
 
     def process_trace(self, request: TraceRequest) -> Optional[LLMRequest]:

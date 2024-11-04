@@ -1,5 +1,6 @@
 import torch
 
+from deserve_worker.kvcache.paged.chunk_pool import ChunkHandle, CpuChunkPool
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool
 from deserve_worker.kvcache.virtual import VirtualPagedKVCache, VirtualPagePool
@@ -9,48 +10,57 @@ class KVCacheManager:
     def __init__(
         self,
         virtual_page_pool: VirtualPagePool,
-        cpu_page_pool: CpuPagePool,
+        cpu_chunk_pool: CpuChunkPool,
     ):
         self.virtual_page_pool = virtual_page_pool
-        self.cpu_page_pool = cpu_page_pool
+        self.cpu_chunk_pool = cpu_chunk_pool
         self.stream = torch.cuda.Stream()  # type: ignore
 
     def copy_gpu_to_cpu(
         self, paged_kvcache: PagedKVCache[VirtualPagePool]
-    ) -> PagedKVCache[CpuPagePool]:
+    ) -> ChunkHandle:
         """
         Only do the copy. The life cycle of KV cache is managed by the caller.
         """
 
         gpu_page_table = paged_kvcache.page_table
         page_table_len = gpu_page_table.shape[0]
-        cpu_page_table = self.cpu_page_pool.alloc(page_table_len)
-        if cpu_page_table is None:
-            raise RuntimeError("Failed to allocate page tables")
+        cpu_chunk_id = self.cpu_chunk_pool.alloc()
+        if cpu_chunk_id is None:
+            raise RuntimeError("Failed to allocate chunks")
+        cpu_chunk = self.cpu_chunk_pool.retrieve(cpu_chunk_id)
         with torch.cuda.stream(self.stream):
-            self.cpu_page_pool.pages[:, cpu_page_table, :, :, :, :] = (
-                self.virtual_page_pool.pages[:, gpu_page_table, :, :, :, :].to("cpu")
+            occupied_size = page_table_len * self.cpu_chunk_pool.num_layers
+            cpu_chunk[:occupied_size].copy_(
+                self.virtual_page_pool.pages[:, gpu_page_table, :, :, :, :].view(
+                    occupied_size,
+                    *self.cpu_chunk_pool.per_token_shape,
+                ),
+                non_blocking=True,
             )
 
-        return PagedKVCache(
-            page_table=cpu_page_table,
-            pool=self.cpu_page_pool,
+        return ChunkHandle(
+            id=cpu_chunk_id, size=page_table_len, pool=self.cpu_chunk_pool
         )
 
-    def copy_cpu_to_gpu(
-        self, paged_kvcache: PagedKVCache[CpuPagePool]
-    ) -> VirtualPagedKVCache:
+    def copy_cpu_to_gpu(self, chunk_handle: ChunkHandle) -> VirtualPagedKVCache:
         """
         Only do the copy. The life cycle of KV cache is managed by the caller.
         """
-        cpu_page_table = paged_kvcache.page_table
-        page_table_len = cpu_page_table.shape[0]
+        page_table_len = chunk_handle.size
         gpu_page_table = self.virtual_page_pool.alloc(page_table_len)
         if gpu_page_table is None:
             raise RuntimeError("Failed to allocate page tables")
         with torch.cuda.stream(self.stream):
-            self.virtual_page_pool.pages[:, gpu_page_table, :, :, :, :] = (
-                self.cpu_page_pool.pages[:, cpu_page_table, :, :, :, :].to("cuda")
+            self.virtual_page_pool.pages[:, gpu_page_table, :, :, :, :].copy_(
+                self.cpu_chunk_pool.retrieve(chunk_handle.id)[
+                    : page_table_len * self.cpu_chunk_pool.num_layers, :, :, :, :
+                ].view(
+                    self.cpu_chunk_pool.num_layers,
+                    page_table_len,
+                    *self.cpu_chunk_pool.per_token_shape,
+                ),
+                non_blocking=True,
             )
         return VirtualPagedKVCache(
             page_table=gpu_page_table,

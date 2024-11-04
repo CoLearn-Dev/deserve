@@ -129,6 +129,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-main-pages", type=int)
     parser.add_argument("--num-swap-pages", type=int)
     parser.add_argument("--simulated-latency", type=float, default=0.0)
+    parser.add_argument("--enable-chunk-prefill", action="store_true")
     args = parser.parse_args()
 
     if args.model == "llama-3-70b":
@@ -154,6 +155,7 @@ if __name__ == "__main__":
             controller_url=args.controller_url,
             worker_url=worker_url,
             simulated_latency=args.simulated_latency,
+            enable_chunk_prefill=args.enable_chunk_prefill,
         )
     else:
         llm_engine = PipelineProcessor(
