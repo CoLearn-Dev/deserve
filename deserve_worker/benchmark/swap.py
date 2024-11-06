@@ -38,7 +38,7 @@ if __name__ == "__main__":
     virtual_page_pool = VirtualPagePool(
         num_layers, main, swap, 8, torch.device("cuda"), torch.float16
     )
-    cpu_chunk_pool = CpuChunkPool(num_layers, 512, 2048, 8, torch.float16)
+    cpu_chunk_pool = CpuChunkPool(num_layers, 18, 8, torch.float16)
     kvcache_manager = KVCacheManager(virtual_page_pool, cpu_chunk_pool)
     task_manager = TaskManager(main, 8)
     processor0 = MicroBatchProcessor(
