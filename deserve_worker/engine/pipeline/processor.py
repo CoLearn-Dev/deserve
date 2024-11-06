@@ -54,8 +54,7 @@ class PipelineProcessor:
         self.max_batch_size = batch_size
         self.cpu_chunk_pool = CpuChunkPool(
             self.num_layers,
-            512,
-            320,
+            16,
             page_size,
             main_dtype,
         )
