@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import threading
 import traceback
 from typing import Any
@@ -36,6 +37,7 @@ app = FastAPI()
 llm_engine: PipelineProcessor
 reorder_buffer: dict[int, StepRequest] = {}
 current_round = 0
+simulated_latency = 0.0
 
 
 def convert_name_to_id(name: str, max_layer: int) -> int:
@@ -69,6 +71,7 @@ async def prefill(request: Request) -> None:
 @app.post("/step")
 async def step(request: Request) -> None:
     body = await request.body()
+    await asyncio.sleep(simulated_latency)
     tensors, metadata = loads(body)
     group_id = metadata["group_id"]
     exec_task_ids = metadata["exec_task_ids"]
@@ -138,10 +141,14 @@ if __name__ == "__main__":
         layers = llama3_8b_layers
     else:
         raise ValueError("Invalid model")
+
     layer_begin = convert_name_to_id(args.layer_begin, len(layers))
     layer_end = convert_name_to_id(args.layer_end, len(layers))
     print(f"Serve from {layers[layer_begin]} to {layers[layer_end - 1]}")
+
+    simulated_latency = args.simulated_latency
     print(f"Simulated latency: {args.simulated_latency * 1000}ms")
+
     worker_url = f"http://localhost:{args.port}"
     if layer_begin == 0:
         llm_engine = PipelineScheduler(
@@ -154,7 +161,6 @@ if __name__ == "__main__":
             next_worker_url=args.next_worker_url,
             controller_url=args.controller_url,
             worker_url=worker_url,
-            simulated_latency=args.simulated_latency,
             enable_chunk_prefill=args.enable_chunk_prefill,
         )
     else:
@@ -168,7 +174,6 @@ if __name__ == "__main__":
             next_worker_url=args.next_worker_url,
             controller_url=args.controller_url,
             worker_url=worker_url,
-            simulated_latency=args.simulated_latency,
         )
     threading.Thread(target=llm_engine.run, daemon=True).start()
     threading.Thread(target=llm_engine.heartbeat, daemon=True).start()
