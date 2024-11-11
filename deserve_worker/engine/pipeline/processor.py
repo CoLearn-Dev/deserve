@@ -157,6 +157,12 @@ class PipelineProcessor:
         self.queue.put(request)
         self.recv_bytes_log += request.get_tensors_size()
 
+    def _post_request(
+        self, url: str, tensors: dict[str, torch.Tensor], metadata: dict[str, Any]
+    ) -> None:
+        data = dumps(tensors, metadata)
+        requests.post(url, data=data)
+
     def send_request(self, request: LLMRequest) -> None:
         if isinstance(request, InitRequest):
             url = f"{self.next_worker_url}/init"
@@ -167,8 +173,7 @@ class PipelineProcessor:
         else:
             raise ValueError(f"Unknown request type: {request}")
         tensors, metadata = request.into_safetensors()
-        data = dumps(tensors, metadata)
-        requests.post(url, data=data)
+        self.network_executor.submit(self._post_request, url, tensors, metadata)
         self.send_bytes_log += request.get_tensors_size()
 
     def send_result(

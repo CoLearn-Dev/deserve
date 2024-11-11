@@ -1,7 +1,9 @@
 import argparse
 import asyncio
 import threading
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import torch
@@ -13,6 +15,7 @@ from deserve_worker.engine.pipeline.scheduler import PipelineScheduler
 from deserve_worker.request import (
     DecodeRequest,
     InitRequest,
+    LLMRequest,
     PrefillRequest,
     StepRequest,
     TraceRequest,
@@ -38,6 +41,8 @@ llm_engine: PipelineProcessor
 reorder_buffer: dict[int, StepRequest] = {}
 current_round = 0
 simulated_latency = 0.0
+latency_simulator = ThreadPoolExecutor(max_workers=64)
+lock = threading.Lock()
 
 
 def convert_name_to_id(name: str, max_layer: int) -> int:
@@ -68,10 +73,24 @@ async def prefill(request: Request) -> None:
     )
 
 
+def add_request(request: StepRequest) -> None:
+    if simulated_latency > 0:
+        time.sleep(simulated_latency)
+    with lock:
+        global current_round
+        if request.microbatch_id == current_round:
+            llm_engine.add_request(request)
+            current_round = (current_round + 1) % llm_engine.num_rounds
+            while current_round in reorder_buffer:
+                llm_engine.add_request(reorder_buffer.pop(current_round))
+                current_round = (current_round + 1) % llm_engine.num_rounds
+        else:
+            reorder_buffer[request.microbatch_id] = request
+
+
 @app.post("/step")
 async def step(request: Request) -> None:
     body = await request.body()
-    await asyncio.sleep(simulated_latency)
     tensors, metadata = loads(body)
     group_id = metadata["group_id"]
     exec_task_ids = metadata["exec_task_ids"]
@@ -90,15 +109,7 @@ async def step(request: Request) -> None:
         reload_task_ids=reload_task_ids,
         init_tasks=init_tasks,
     )
-    global current_round
-    if llm_request.microbatch_id == current_round:
-        llm_engine.add_request(llm_request)
-        current_round = (current_round + 1) % llm_engine.num_rounds
-        while current_round in reorder_buffer:
-            llm_engine.add_request(reorder_buffer.pop(current_round))
-            current_round = (current_round + 1) % llm_engine.num_rounds
-    else:
-        reorder_buffer[llm_request.microbatch_id] = llm_request
+    latency_simulator.submit(add_request, llm_request)
 
 
 @app.post("/trace")
