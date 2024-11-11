@@ -30,6 +30,7 @@ class PipelineScheduler(PipelineProcessor):
         next_worker_url: str,
         controller_url: str,
         enable_chunk_prefill: bool,
+        buddy_height: int,
     ) -> None:
         super().__init__(
             num_rounds,
@@ -41,6 +42,7 @@ class PipelineScheduler(PipelineProcessor):
             worker_url,
             next_worker_url,
             controller_url,
+            buddy_height,
         )
         self.pending_prefills: dict[str, tuple[torch.Tensor, SamplingParams]] = {}
         self.offloaded_decodes: dict[str, torch.Tensor] = {}
