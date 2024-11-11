@@ -47,13 +47,14 @@ class PipelineProcessor:
         worker_url: str,
         next_worker_url: str,
         controller_url: str,
+        buddy_height: int,
     ) -> None:
         self.num_rounds = num_rounds
         self.num_layers = sum(layer.count(".") for layer in layers)
         self.max_batch_size = batch_size
         self.cpu_chunk_pool = CpuChunkPool(
             self.num_layers,
-            16,
+            buddy_height,
             page_size,
             main_dtype,
         )
