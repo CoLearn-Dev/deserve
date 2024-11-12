@@ -36,7 +36,7 @@ class KVCacheManager:
                     occupied_size,
                     *self.cpu_chunk_pool.per_token_shape,
                 ),
-                non_blocking=True,
+                # non_blocking=True,
             )
 
         return cpu_chunk_handle
@@ -58,7 +58,7 @@ class KVCacheManager:
                     page_table_len,
                     *self.cpu_chunk_pool.per_token_shape,
                 ),
-                non_blocking=True,
+                # non_blocking=True,
             )
         return VirtualPagedKVCache(
             page_table=gpu_page_table,
