@@ -25,6 +25,7 @@ class MicroBatchProcessor:
         kvcache_manager: KVCacheManager,
         task_data_manager: TaskManager,
         layer_storage: LayerStorage,
+        ignore_eos: bool,
     ) -> None:
         self.kvcache_manager = kvcache_manager
         self.pinned_memory = CopiedPinnedMemory(
@@ -36,6 +37,7 @@ class MicroBatchProcessor:
         self.layer_storage = layer_storage
         self.ongoing_paged_kvcaches: dict[str, VirtualPagedKVCache] = {}
         self.cuda_stream = torch.cuda.Stream()  # type: ignore
+        self.ignore_eos = ignore_eos
 
     def join(
         self,
@@ -61,8 +63,8 @@ class MicroBatchProcessor:
             self.ongoing_paged_kvcaches.pop(task_id) for task_id in task_ids
         ]
         cpu_chunk_handles = [
-            self.kvcache_manager.copy_gpu_to_cpu(paged_kvcache)
-            for paged_kvcache in paged_kvcaches
+            self.kvcache_manager.copy_gpu_to_cpu(paged_kvcache, task_id)
+            for paged_kvcache, task_id in zip(paged_kvcaches, task_ids)
         ]
         for paged_kvcache in paged_kvcaches:
             paged_kvcache.free()
@@ -73,8 +75,8 @@ class MicroBatchProcessor:
         Resume the execution of the task in a blocking manner.
         """
         gpu_paged_kvcaches = [
-            self.kvcache_manager.copy_cpu_to_gpu(cpu_chunk_handle)
-            for cpu_chunk_handle in cpu_chunk_handles
+            self.kvcache_manager.copy_cpu_to_gpu(cpu_chunk_handle, task_id)
+            for cpu_chunk_handle, task_id in zip(cpu_chunk_handles, task_ids)
         ]
         for task_id, gpu_paged_kvcache in zip(task_ids, gpu_paged_kvcaches):
             self.ongoing_paged_kvcaches[task_id] = gpu_paged_kvcache
@@ -96,7 +98,7 @@ class MicroBatchProcessor:
             task_datas,
             cast(list[PagedKVCache[GpuPagePool]], kvcaches),
         )
-        return decode.step()
+        return decode.step(self.ignore_eos)
 
     def step(
         self,
@@ -120,7 +122,7 @@ class MicroBatchProcessor:
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_group.pinned_memory, prev_group.pinned_memory
             )
-            return decode.step()
+            return decode.step(self.ignore_eos)
         else:
             prefill = BatchPrefill(
                 xs,
@@ -133,7 +135,7 @@ class MicroBatchProcessor:
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_group.pinned_memory, prev_group.pinned_memory
             )
-            return prefill.step()
+            return prefill.step(self.ignore_eos)
 
     def synchronize(self) -> None:
         self.cuda_stream.synchronize()  # type: ignore

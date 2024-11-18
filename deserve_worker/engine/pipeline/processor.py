@@ -48,6 +48,7 @@ class PipelineProcessor:
         next_worker_url: str,
         controller_url: str,
         buddy_height: int,
+        ignore_eos: bool,
     ) -> None:
         self.num_rounds = num_rounds
         self.num_layers = sum(layer.count(".") for layer in layers)
@@ -83,6 +84,7 @@ class PipelineProcessor:
                 self.kvcache_manager,
                 self.task_manager,
                 self.layer_storage,
+                ignore_eos,
             )
             for _ in range(num_rounds)
         ]
@@ -98,6 +100,7 @@ class PipelineProcessor:
         self.highest_upload_speed: float = 0
         self.highest_download_speed: float = 0
         self.current_microbatch_id = 0
+        self.ignore_eos = ignore_eos
 
     def staged_print(self) -> None:
         total_batch_size = sum(

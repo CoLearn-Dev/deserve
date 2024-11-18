@@ -12,8 +12,9 @@ class MicroBatchScheduler(MicroBatchProcessor):
         kvcache_manager: KVCacheManager,
         task_data_manager: TaskManager,
         layer_storage: LayerStorage,
+        ignore_eos: bool,
     ) -> None:
-        super().__init__(kvcache_manager, task_data_manager, layer_storage)
+        super().__init__(kvcache_manager, task_data_manager, layer_storage, ignore_eos)
         self.suspended_decodes: dict[str, torch.Tensor] = {}
         self.suspended_prefills: dict[str, torch.Tensor] = {}
 

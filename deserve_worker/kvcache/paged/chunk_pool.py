@@ -51,10 +51,12 @@ class ChunkPool:
 
     def split(self, begin: int, end: int) -> None:
         for level in range(end, begin, -1):
-            parent_id = self.available_ids[level].pop(0)
+            parent_id = self.available_ids[level].pop()
             left_child = parent_id * 2
             right_child = parent_id * 2 + 1
-            self.available_ids[level - 1].extend([left_child, right_child])
+            self.available_ids[level - 1].extend(
+                [left_child, right_child]
+            )  # FIXME: insert in right place
 
     def alloc(self, size: int) -> ChunkHandle:
         with self.mutex:
@@ -64,6 +66,10 @@ class ChunkPool:
                     if len(self.available_ids[i]) != 0:
                         self.split(target_level, i)
                         break
+            if len(self.available_ids[target_level]) == 0:
+                raise RuntimeError(
+                    f"Failed to allocate chunks for size {size} on level {target_level}"
+                )
             id = self.available_ids[target_level].pop(0)
             return ChunkHandle(id, target_level, size, self)
 
@@ -83,7 +89,8 @@ class ChunkPool:
             for curr_level in range(level, self.height):
                 target_ids = self.available_ids[curr_level]
                 pos = bisect.bisect_left(target_ids, id)
-                if ret := insert_or_pop(target_ids, id, pos):
+                ret = insert_or_pop(target_ids, id, pos)
+                if ret is not None:
                     id = ret
                 else:
                     break

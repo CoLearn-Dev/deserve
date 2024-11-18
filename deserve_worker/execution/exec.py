@@ -107,7 +107,7 @@ class BatchExec:
         self.xs = self.xs[:-seqlen]
         return result
 
-    def post_process(self, result: torch.Tensor) -> BatchResult:
+    def post_process(self, result: torch.Tensor, ignore_eos: bool) -> BatchResult:
         if self.layer_storage.need_sample:
             (
                 ongoing_tokens,
@@ -116,7 +116,7 @@ class BatchExec:
                 all_datas,
                 done_datas,
                 needed_probs,
-            ) = self.layer_storage.sample(result, self.task_datas)
+            ) = self.layer_storage.sample(result, self.task_datas, ignore_eos)
             if len(ongoing_tokens) == 0:
                 ongoing_xs = torch.empty(0, dtype=torch.int, device=main_device)
             else:
@@ -191,12 +191,12 @@ class BatchDecode(BatchExec):
                 page_size=model_args.page_size,
             )
 
-    def step(self) -> BatchResult:
+    def step(self, ignore_eos: bool) -> BatchResult:
         with torch.inference_mode():
             assert self.decode_ctx is not None
             result = self.layer_storage.forward(self.xs, self.decode_ctx)
             decode_wrapper.end_forward()
-            return self.post_process(result)
+            return self.post_process(result, ignore_eos)
 
 
 @dataclass
@@ -235,12 +235,12 @@ class BatchPrefill(BatchExec):
                 page_size=model_args.page_size,
             )
 
-    def step(self) -> BatchResult:
+    def step(self, ignore_eos: bool) -> BatchResult:
         with torch.inference_mode():
             assert self.prefill_ctx is not None
             result = self.layer_storage.forward(self.xs, self.prefill_ctx)
             prefill_wrapper.end_forward()
-            return self.post_process(result)
+            return self.post_process(result, ignore_eos)
 
 
 @dataclass

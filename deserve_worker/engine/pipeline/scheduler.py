@@ -9,7 +9,8 @@ from deserve_worker.engine.microbatch.scheduler import MicroBatchScheduler
 from deserve_worker.engine.pipeline.processor import PipelineProcessor
 from deserve_worker.engine.pipeline.stage import Stage
 from deserve_worker.engine.pipeline.stage.join import (
-    AgggregatedJoinStage,
+    DecodeFirstAgggregatedJoinStage,
+    PrefillFirstAgggregatedJoinStage,
     VanillaJoinStage,
 )
 from deserve_worker.engine.pipeline.stage.swap import SwapStage
@@ -29,8 +30,10 @@ class PipelineScheduler(PipelineProcessor):
         worker_url: str,
         next_worker_url: str,
         controller_url: str,
-        enable_chunk_prefill: bool,
+        prefill_first_aggregate: bool,
+        decode_first_aggregate: bool,
         buddy_height: int,
+        ignore_eos: bool,
     ) -> None:
         super().__init__(
             num_rounds,
@@ -43,23 +46,13 @@ class PipelineScheduler(PipelineProcessor):
             next_worker_url,
             controller_url,
             buddy_height,
+            ignore_eos,
         )
         self.pending_prefills: dict[str, tuple[torch.Tensor, SamplingParams]] = {}
         self.offloaded_decodes: dict[str, torch.Tensor] = {}
         self.offloaded_prefills: dict[str, torch.Tensor] = {}
         self.join_stages: list[Stage] = (
             [
-                AgggregatedJoinStage(
-                    self.task_manager,
-                    self.pending_prefills,
-                    microbatch.suspended_prefills,
-                    microbatch.suspended_decodes,
-                    512,
-                )
-                for microbatch in self.microbatches
-            ]
-            if enable_chunk_prefill
-            else [
                 VanillaJoinStage(
                     self.task_manager,
                     self.pending_prefills,
@@ -67,6 +60,30 @@ class PipelineScheduler(PipelineProcessor):
                 )
                 for microbatch in self.microbatches
             ]
+            if not prefill_first_aggregate and not decode_first_aggregate
+            else (
+                [
+                    DecodeFirstAgggregatedJoinStage(
+                        self.task_manager,
+                        self.pending_prefills,
+                        microbatch.suspended_prefills,
+                        microbatch.suspended_decodes,
+                        512,
+                    )
+                    for microbatch in self.microbatches
+                ]
+                if decode_first_aggregate
+                else [
+                    PrefillFirstAgggregatedJoinStage(
+                        self.task_manager,
+                        self.pending_prefills,
+                        microbatch.suspended_prefills,
+                        microbatch.suspended_decodes,
+                        512,
+                    )
+                    for microbatch in self.microbatches
+                ]
+            )
         )
         self.swap_stages: list[SwapStage] = [
             SwapStage(
