@@ -143,8 +143,10 @@ if __name__ == "__main__":
     parser.add_argument("--num-main-pages", type=int)
     parser.add_argument("--num-swap-pages", type=int)
     parser.add_argument("--simulated-latency", type=float, default=0.0)
-    parser.add_argument("--enable-chunk-prefill", action="store_true")
+    parser.add_argument("--prefill-first-aggregate", action="store_true")
+    parser.add_argument("--decode-first-aggregate", action="store_true")
     parser.add_argument("--buddy-height", type=int, default=16)
+    parser.add_argument("--ignore-eos", action="store_true")
     args = parser.parse_args()
 
     if args.model == "llama-3-70b":
@@ -173,8 +175,10 @@ if __name__ == "__main__":
             next_worker_url=args.next_worker_url,
             controller_url=args.controller_url,
             worker_url=worker_url,
-            enable_chunk_prefill=args.enable_chunk_prefill,
+            prefill_first_aggregate=args.prefill_first_aggregate,
+            decode_first_aggregate=args.decode_first_aggregate,
             buddy_height=args.buddy_height,
+            ignore_eos=args.ignore_eos,
         )
     else:
         llm_engine = PipelineProcessor(
@@ -188,6 +192,7 @@ if __name__ == "__main__":
             controller_url=args.controller_url,
             worker_url=worker_url,
             buddy_height=args.buddy_height,
+            ignore_eos=args.ignore_eos,
         )
     threading.Thread(target=llm_engine.run, daemon=True).start()
     threading.Thread(target=llm_engine.heartbeat, daemon=True).start()

@@ -47,7 +47,7 @@ class SwapStage(Stage):
                 request.offload_task_ids.append(task_id)
             if rest_pages < 0:
                 assert all(seqlen == 1 for seqlen in request.exec_seqlens)
-                for i in reversed(range(len(request.exec_task_ids))):
+                for i in reversed(range(len(request.exec_task_ids) + 1)):
                     todo_task_ids = request.exec_task_ids[: i + 1]
                     to_offload_decode_task_ids = request.exec_task_ids[i + 1 :]
                     appended_pages = self.manager.calc_occupied_space(
@@ -66,6 +66,7 @@ class SwapStage(Stage):
                             ]
                             assert self.local_offloaded_decodes[task_id].numel() > 0
                         return rest_pages, request
+                # cannot move forward, because pages are occupied by other rounds, or the number of pages required by the request cannot be satisfied
                 raise RuntimeError("Unable to fetch enough pages")
         else:
             offloaded_prefills = sorted(

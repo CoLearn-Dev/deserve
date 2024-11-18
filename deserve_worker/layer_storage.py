@@ -196,7 +196,9 @@ class LayerStorage:
         return h
 
     @torch.inference_mode()
-    def sample(self, merged_h: torch.Tensor, task_datas: list[TaskData]) -> tuple[
+    def sample(
+        self, merged_h: torch.Tensor, task_datas: list[TaskData], ignore_eos: bool
+    ) -> tuple[
         list[torch.Tensor],
         list[TaskData],
         list[torch.Tensor],
@@ -218,7 +220,8 @@ class LayerStorage:
             h = merged_h[ptr : ptr + seqlen]
             ptr += seqlen
             sampling_params = task_data.sampling_params
-            sampling_params.max_new_tokens -= 1
+            if task_data.finished_prefill():
+                sampling_params.max_new_tokens -= 1
             if (
                 sampling_params.max_new_tokens <= 0
                 or task_data.start_pos >= sampling_params.max_seq_len
@@ -254,8 +257,9 @@ class LayerStorage:
                 all_datas.append(task_data)
                 all_tokens.append(next_token)
                 if (
-                    next_token[-1] in STOP_TOKEN_IDS
+                    (next_token[-1] in STOP_TOKEN_IDS and not ignore_eos)
                     or sampling_params.max_new_tokens <= 0
+                    or task_data.start_pos >= sampling_params.max_seq_len
                 ):
                     done_datas.append(task_data)
                 else:
