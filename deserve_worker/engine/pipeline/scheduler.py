@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 
+from deserve_network import Server
 from deserve_worker.engine.microbatch.scheduler import MicroBatchScheduler
 from deserve_worker.engine.pipeline.processor import PipelineProcessor
 from deserve_worker.engine.pipeline.stage import Stage
@@ -34,6 +35,7 @@ class PipelineScheduler(PipelineProcessor):
         decode_first_aggregate: bool,
         buddy_height: int,
         ignore_eos: bool,
+        server: Server,
     ) -> None:
         super().__init__(
             num_rounds,
@@ -47,6 +49,7 @@ class PipelineScheduler(PipelineProcessor):
             controller_url,
             buddy_height,
             ignore_eos,
+            server,
         )
         self.pending_prefills: dict[str, tuple[torch.Tensor, SamplingParams]] = {}
         self.offloaded_decodes: dict[str, torch.Tensor] = {}
