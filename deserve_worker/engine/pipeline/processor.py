@@ -9,6 +9,7 @@ from typing import Any, Optional, cast
 import requests
 import torch
 
+from deserve_network import Server
 from deserve_utils.trace import OpId
 from deserve_worker.engine.microbatch.scheduler import MicroBatchScheduler
 from deserve_worker.execution.exec import BatchPrefill, SingleTrace
@@ -49,6 +50,7 @@ class PipelineProcessor:
         controller_url: str,
         buddy_height: int,
         ignore_eos: bool,
+        server: Server,
     ) -> None:
         self.num_rounds = num_rounds
         self.num_layers = sum(layer.count(".") for layer in layers)
@@ -101,6 +103,7 @@ class PipelineProcessor:
         self.highest_download_speed: float = 0
         self.current_microbatch_id = 0
         self.ignore_eos = ignore_eos
+        self.server = server
 
     def staged_print(self) -> None:
         total_batch_size = sum(
@@ -160,12 +163,6 @@ class PipelineProcessor:
         self.queue.put(request)
         self.recv_bytes_log += request.get_tensors_size()
 
-    def _post_request(
-        self, url: str, tensors: dict[str, torch.Tensor], metadata: dict[str, Any]
-    ) -> None:
-        data = dumps(tensors, metadata)
-        requests.post(url, data=data)
-
     def send_request(self, request: LLMRequest) -> None:
         if isinstance(request, InitRequest):
             url = f"{self.next_worker_url}/init"
@@ -176,7 +173,7 @@ class PipelineProcessor:
         else:
             raise ValueError(f"Unknown request type: {request}")
         tensors, metadata = request.into_safetensors()
-        self.network_executor.submit(self._post_request, url, tensors, metadata)
+        result = self.server.send_tensors(url, tensors, metadata)
         self.send_bytes_log += request.get_tensors_size()
 
     def send_result(

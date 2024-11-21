@@ -10,6 +10,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, Request
 
+from deserve_network import Server
 from deserve_worker.engine.pipeline.processor import PipelineProcessor
 from deserve_worker.engine.pipeline.scheduler import PipelineScheduler
 from deserve_worker.request import (
@@ -58,10 +59,7 @@ def convert_name_to_id(name: str, max_layer: int) -> int:
         raise ValueError("Invalid layer name")
 
 
-@app.post("/prefill")
-async def prefill(request: Request) -> None:
-    body = await request.body()
-    tensors, metadata = loads(body)
+def prefill(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> None:
     task_id = metadata["task_id"]
     sampling_params = SamplingParams.model_validate(metadata["sampling_params"])
     llm_engine.add_request(
@@ -88,10 +86,7 @@ def add_request(request: StepRequest) -> None:
             reorder_buffer[request.microbatch_id] = request
 
 
-@app.post("/step")
-async def step(request: Request) -> None:
-    body = await request.body()
-    tensors, metadata = loads(body)
+def step(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> None:
     group_id = metadata["group_id"]
     exec_task_ids = metadata["exec_task_ids"]
     exec_seqlens = metadata["exec_seqlens"]
@@ -112,10 +107,7 @@ async def step(request: Request) -> None:
     latency_simulator.submit(add_request, llm_request)
 
 
-@app.post("/trace")
-async def trace(request: Request) -> None:
-    body = await request.body()
-    tensors, metadata = loads(body)
+def trace(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> None:
     task_id = metadata["task_id"]
     sampling_params = SamplingParams.model_validate(metadata["sampling_params"])
     sampling_params.dump_probs_num = (
@@ -164,6 +156,7 @@ if __name__ == "__main__":
     print(f"Simulated latency: {args.simulated_latency * 1000}ms")
 
     worker_url = f"http://localhost:{args.port}"
+    server = Server(f"0.0.0.0:{args.port}", ["/prefill", "/step", "/trace"], 64)
     if layer_begin == 0:
         llm_engine = PipelineScheduler(
             args.num_rounds,
@@ -179,6 +172,7 @@ if __name__ == "__main__":
             decode_first_aggregate=args.decode_first_aggregate,
             buddy_height=args.buddy_height,
             ignore_eos=args.ignore_eos,
+            server=server,
         )
     else:
         llm_engine = PipelineProcessor(
@@ -193,8 +187,16 @@ if __name__ == "__main__":
             worker_url=worker_url,
             buddy_height=args.buddy_height,
             ignore_eos=args.ignore_eos,
+            server=server,
         )
     threading.Thread(target=llm_engine.run, daemon=True).start()
     threading.Thread(target=llm_engine.heartbeat, daemon=True).start()
     threading.Thread(target=llm_engine.log, daemon=True).start()
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
+    while True:
+        route, tensors, metadata = server.recv_tensors()
+        if route == "/prefill":
+            prefill(tensors, metadata)
+        elif route == "/step":
+            step(tensors, metadata)
+        elif route == "/trace":
+            trace(tensors, metadata)
