@@ -17,6 +17,7 @@ from deserve_worker.kvcache.manager import KVCacheManager
 from deserve_worker.kvcache.paged.chunk_pool import ChunkHandle, CpuChunkPool
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool, GpuPagePool
+from deserve_worker.kvcache.paged.page_table import PageTableAllocator
 from deserve_worker.kvcache.pinned.pinned_memory import PinnedMemory
 from deserve_worker.kvcache.virtual import VirtualPagePool
 from deserve_worker.layer_storage import LayerManager
@@ -69,8 +70,11 @@ class PipelineProcessor:
             main_device,
             main_dtype,
         )
+        self.page_table_allocator = PageTableAllocator(
+            batch_size * num_rounds, 4096, page_size, main_device
+        )
         self.kvcache_manager = KVCacheManager(
-            self.virtual_page_pool, self.cpu_chunk_pool
+            self.virtual_page_pool, self.cpu_chunk_pool, self.page_table_allocator
         )
         self.task_manager = TaskManager(num_pages_main + num_pages_swap, page_size)
         self.offloaded_kvcaches: dict[str, ChunkHandle] = {}
@@ -86,6 +90,7 @@ class PipelineProcessor:
                 self.kvcache_manager,
                 self.task_manager,
                 self.layer_storage,
+                self.page_table_allocator,
                 ignore_eos,
             )
             for _ in range(num_rounds)

@@ -8,6 +8,7 @@ from deserve_worker.kvcache.manager import KVCacheManager
 from deserve_worker.kvcache.paged.chunk_pool import ChunkHandle
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool, GpuPagePool
+from deserve_worker.kvcache.paged.page_table import PageTableAllocator
 from deserve_worker.kvcache.pinned.kvcache import PinnedKVCache
 from deserve_worker.kvcache.pinned.pinned_memory import PinnedMemory
 from deserve_worker.kvcache.virtual import (
@@ -25,6 +26,7 @@ class MicroBatchProcessor:
         kvcache_manager: KVCacheManager,
         task_data_manager: TaskManager,
         layer_storage: LayerStorage,
+        page_table_allocator: PageTableAllocator,
         ignore_eos: bool,
     ) -> None:
         self.kvcache_manager = kvcache_manager
@@ -38,6 +40,7 @@ class MicroBatchProcessor:
         self.ongoing_paged_kvcaches: dict[str, VirtualPagedKVCache] = {}
         self.cuda_stream = torch.cuda.Stream()  # type: ignore
         self.ignore_eos = ignore_eos
+        self.page_table_allocator = page_table_allocator
 
     def join(
         self,
@@ -45,7 +48,7 @@ class MicroBatchProcessor:
     ) -> None:
         for task_id in task_ids:
             self.ongoing_paged_kvcaches[task_id] = VirtualPagedKVCache.empty(
-                self.kvcache_manager.virtual_page_pool
+                self.page_table_allocator, self.kvcache_manager.virtual_page_pool
             )
 
     def adjust(self) -> None:
