@@ -34,13 +34,11 @@ class FlashForwardCtx(PagedForwardCtx):
                 task_data.start_pos + task_data.seqlen, task_data.initial_seqlen
             )
             current_len = task_data.start_pos + task_data.seqlen
-            page_table_len = (
-                current_len + kvcache.pool.page_size - 1
-            ) // kvcache.pool.page_size
+            page_table_len = kvcache.pool.calc_num_pages(current_len)
             page_table_remain = (current_len - 1) % kvcache.pool.page_size + 1
             kvcache.extend(total_len)
             kv_last_page_lens.append(page_table_remain)
-            kvcache_list.append(kvcache.page_table[:page_table_len])
+            kvcache_list.append(kvcache.page_table.retrieve()[:page_table_len])
 
         len_list = [0] + [kvcache.shape[0] for kvcache in kvcache_list]
         seqlens = [task_data.seqlen for task_data in task_datas]

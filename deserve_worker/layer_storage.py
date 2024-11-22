@@ -263,6 +263,8 @@ class LayerStorage:
                 ):
                     done_datas.append(task_data)
                 else:
+                    if next_token[-1] != 70540:
+                        print(f"[{task_data.task_id}] is wrong")
                     ongoing_datas.append(task_data)
                     ongoing_tokens.append(next_token)
         return (

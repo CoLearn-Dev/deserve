@@ -2,6 +2,7 @@ import torch
 
 from deserve_worker.engine.microbatch.processor import MicroBatchProcessor
 from deserve_worker.kvcache.manager import KVCacheManager
+from deserve_worker.kvcache.paged.page_table import PageTableAllocator
 from deserve_worker.layer_storage import LayerStorage
 from deserve_worker.task import TaskManager, main_device, main_dtype
 
@@ -12,9 +13,16 @@ class MicroBatchScheduler(MicroBatchProcessor):
         kvcache_manager: KVCacheManager,
         task_data_manager: TaskManager,
         layer_storage: LayerStorage,
+        page_table_allocator: PageTableAllocator,
         ignore_eos: bool,
     ) -> None:
-        super().__init__(kvcache_manager, task_data_manager, layer_storage, ignore_eos)
+        super().__init__(
+            kvcache_manager,
+            task_data_manager,
+            layer_storage,
+            page_table_allocator,
+            ignore_eos,
+        )
         self.suspended_decodes: dict[str, torch.Tensor] = {}
         self.suspended_prefills: dict[str, torch.Tensor] = {}
 

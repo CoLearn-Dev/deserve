@@ -2,6 +2,7 @@ import torch
 
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import GpuPagePool
+from deserve_worker.kvcache.paged.page_table import PageTableAllocator, PageTableHandle
 from deserve_worker.kvcache.pinned.pinned_memory import PinnedMemory
 
 
@@ -156,54 +157,44 @@ class VirtualPagePool(GpuPagePool):
 
 class VirtualPagedKVCache(PagedKVCache[VirtualPagePool]):
     def __init__(
-        self, page_table: torch.Tensor, isswap: torch.Tensor, pool: VirtualPagePool
+        self, page_table: PageTableHandle, isswap: torch.Tensor, pool: VirtualPagePool
     ) -> None:
         super().__init__(page_table, pool)
         self.isswap = isswap
 
     @staticmethod
-    def empty(pool: VirtualPagePool) -> "VirtualPagedKVCache":
+    def empty(
+        allocator: PageTableAllocator, pool: VirtualPagePool
+    ) -> "VirtualPagedKVCache":
         return VirtualPagedKVCache(
-            torch.empty((0,), device=pool.main_device, dtype=torch.int32),
-            torch.empty((0,), device=pool.main_device, dtype=torch.bool),
+            allocator.alloc(),
+            torch.zeros(
+                (allocator.max_context_len,), device=pool.main_device, dtype=torch.bool
+            ),
             pool,
         )
 
-    def extend(self, size: int) -> bool:
-        if size > self.page_table.shape[0] * self.pool.page_size:
-            len = self.pool.calc_num_pages(size)
-            delta = len - self.page_table.shape[0]
+    def extend(self, num_tokens: int) -> bool:
+        if num_tokens > self.page_table.occupied * self.pool.page_size:
+            new_num_pages = self.pool.calc_num_pages(num_tokens)
+            delta = new_num_pages - self.page_table.occupied
             page_indices = self.pool.alloc(delta)
             if page_indices is None:
                 return False
-            else:
-                new_page_table = torch.empty(
-                    (len,),
-                    device=self.pool.main_device,
-                    dtype=torch.int32,
-                )
-                new_page_table[: self.page_table.shape[0]] = self.page_table[:]
-                new_page_table[self.page_table.shape[0] :] = page_indices
-                self.page_table = new_page_table
-
-                new_isswap = torch.empty(
-                    (len,),
-                    device=self.pool.main_device,
-                    dtype=torch.bool,
-                )
-                new_isswap[: self.isswap.shape[0]] = self.isswap[:]
-                new_isswap[self.isswap.shape[0] :] = (
-                    page_indices >= self.pool.num_pages_main
-                )
-                self.isswap = new_isswap
+            self.isswap[self.page_table.occupied : new_num_pages] = (
+                page_indices >= self.pool.num_pages_main
+            )
+            self.page_table.extend(page_indices)
         return True
 
     def adjust(self, offset: int) -> None:
-        self.page_table[self.isswap] += offset
+        self.page_table.retrieve()[self.isswap[: self.page_table.occupied]] += offset
 
     def free(self) -> None:
-        self.pool.free(self.page_table)
-        self.page_table = torch.empty(
-            (0,), device=self.pool.main_device, dtype=torch.int32
+        self.pool.free(self.page_table.retrieve())
+        self.page_table.free()
+        self.isswap = torch.empty(
+            (0,),
+            device=self.pool.main_device,
+            dtype=torch.bool,
         )
-        self.isswap = torch.empty((0,), device=self.pool.main_device, dtype=torch.bool)

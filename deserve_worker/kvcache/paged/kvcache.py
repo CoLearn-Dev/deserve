@@ -4,44 +4,33 @@ import torch
 from typing_extensions import TypeVar
 
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool, GpuPagePool, PagePool
+from deserve_worker.kvcache.paged.page_table import PageTableAllocator, PageTableHandle
 
 P = TypeVar("P", bound="PagePool")
 
 
 class PagedKVCache(Generic[P]):
-    def __init__(self, page_table: torch.Tensor, pool: P) -> None:
+    def __init__(self, page_table: PageTableHandle, pool: P) -> None:
         self.page_table = page_table
         self.pool = pool
 
     @staticmethod
-    def empty(pool: P) -> "PagedKVCache[P]":
-        return PagedKVCache(
-            torch.empty((0,), device=pool.main_device, dtype=torch.int32), pool
-        )
+    def empty(allocator: PageTableAllocator, pool: P) -> "PagedKVCache[P]":
+        return PagedKVCache(allocator.alloc(), pool)
 
-    def extend(self, size: int) -> bool:
-        if size > self.page_table.shape[0] * self.pool.page_size:
-            len = self.pool.calc_num_pages(size)
-            delta = len - self.page_table.shape[0]
+    def extend(self, num_tokens: int) -> bool:
+        if num_tokens > self.page_table.occupied * self.pool.page_size:
+            new_num_pages = self.pool.calc_num_pages(num_tokens)
+            delta = new_num_pages - self.page_table.occupied
             page_indices = self.pool.alloc(delta)
             if page_indices is None:
                 return False
-            else:
-                new_page_table = torch.empty(
-                    (len,),
-                    device=self.pool.main_device,
-                    dtype=torch.int32,
-                )
-                new_page_table[: self.page_table.shape[0]] = self.page_table[:]
-                new_page_table[self.page_table.shape[0] :] = page_indices
-                self.page_table = new_page_table
+            self.page_table.extend(page_indices)
         return True
 
     def free(self) -> None:
-        self.pool.free(self.page_table)
-        self.page_table = torch.empty(
-            (0,), device=self.pool.main_device, dtype=torch.int32
-        )
+        self.pool.free(self.page_table.retrieve())
+        self.page_table.free()
 
 
 GpuPagedKVCache = PagedKVCache[GpuPagePool]
