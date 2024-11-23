@@ -10,6 +10,7 @@ from deserve_worker.benchmark.utils import convert_name_to_id, layers
 from deserve_worker.execution.exec import BatchDecode, BatchPrefill
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import GpuPagePool
+from deserve_worker.kvcache.paged.page_table import PageTableAllocator
 from deserve_worker.layer_storage import LayerManager, LayerStorage
 from deserve_worker.model.args import llama_3_70b_args
 from deserve_worker.task import SamplingParams, TaskData
@@ -18,6 +19,7 @@ from deserve_worker.task import SamplingParams, TaskData
 def profile_decode(
     layer_storage: LayerStorage,
     gpu_page_pool: GpuPagePool,
+    page_table_allocator: PageTableAllocator,
     begin: int,
     bsz: int,
     prefix: int,
@@ -59,13 +61,14 @@ def profile_decode(
             initial_seqlen=prefix,
             sampling_params=sparam,
         )
+        task_data.init(prefix)
         task_datas.append(task_data)
-        kvcaches.append(PagedKVCache.empty(gpu_page_pool))
+        kvcaches.append(PagedKVCache.empty(page_table_allocator, gpu_page_pool))
         prefill = BatchPrefill(
             prefill_input, layer_storage, [task_data], [kvcaches[-1]]
         )
         prefill.prepare()
-        prefill.step()
+        prefill.step(ignore_eos=False)
         task_data.step()
     times = []
     for i in range(100):
@@ -73,7 +76,7 @@ def profile_decode(
         time_begin = time.time()
         decode = BatchPrefill(decode_input, layer_storage, task_datas, kvcaches)
         decode.prepare()
-        decode.step()
+        decode.step(ignore_eos=False)
         for task_data in task_datas:
             task_data.step()
         torch.cuda.synchronize()
@@ -106,6 +109,7 @@ if __name__ == "__main__":
     gpu_page_pool = GpuPagePool(
         num_layers, 9000, 8, torch.device("cuda"), torch.float16
     )
+    page_table_allocator = PageTableAllocator(num_layers, 4096, 8, torch.device("cuda"))
     print(
-        f"Decode time: {profile_decode(layer_storage, gpu_page_pool, begin, bsz, prefix, extra)} ms",
+        f"Decode time: {profile_decode(layer_storage, gpu_page_pool, page_table_allocator, begin, bsz, prefix, extra)} ms",
     )

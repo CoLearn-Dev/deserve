@@ -7,6 +7,7 @@ from deserve_worker.benchmark.utils import convert_name_to_id, layers
 from deserve_worker.execution.exec import BatchPrefill
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import GpuPagePool
+from deserve_worker.kvcache.paged.page_table import PageTableAllocator
 from deserve_worker.layer_storage import LayerManager, LayerStorage
 from deserve_worker.model.args import llama_3_70b_args
 from deserve_worker.task import SamplingParams, TaskData
@@ -15,6 +16,7 @@ from deserve_worker.task import SamplingParams, TaskData
 def profile_prefill(
     layer_storage: LayerStorage,
     gpu_page_pool: GpuPagePool,
+    page_table_allocator: PageTableAllocator,
     begin: int,
     bsz: int,
     prefix: int,
@@ -48,7 +50,7 @@ def profile_prefill(
                 sampling_params=sparam,
             )
             task_datas.append(task_data)
-            kvcaches.append(PagedKVCache.empty(gpu_page_pool))
+            kvcaches.append(PagedKVCache.empty(page_table_allocator, gpu_page_pool))
         torch.cuda.synchronize()
         begin_time = time.time()
         prefill = BatchPrefill(
@@ -57,7 +59,8 @@ def profile_prefill(
             task_datas,
             kvcaches,
         )
-        prefill.step()
+        prefill.prepare()
+        prefill.step(ignore_eos=False)
         torch.cuda.synchronize()
         end_time = time.time()
         for kvcache in kvcaches:
@@ -83,9 +86,10 @@ if __name__ == "__main__":
     layer_manager = LayerManager(torch.device("cuda"))
     layer_storage = layer_manager.get_layer_storage(layers[begin:end])
     num_layers = sum(layer.count(".") for layer in layers[begin:end])
+    page_table_allocator = PageTableAllocator(num_layers, 4096, 8, torch.device("cuda"))
     gpu_page_pool = GpuPagePool(
         num_layers, 9000, 8, torch.device("cuda"), torch.float16
     )
     print(
-        f"Prefill time: {profile_prefill(layer_storage, gpu_page_pool, begin, bsz, prefix)} ms"
+        f"Prefill time: {profile_prefill(layer_storage, gpu_page_pool, page_table_allocator, begin, bsz, prefix)} ms"
     )
