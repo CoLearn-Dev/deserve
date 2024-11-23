@@ -8,6 +8,7 @@ from deserve_worker.engine.microbatch.processor import MicroBatchProcessor
 from deserve_worker.kvcache.manager import KVCacheManager
 from deserve_worker.kvcache.paged.chunk_pool import CpuChunkPool
 from deserve_worker.kvcache.paged.page_pool import CpuPagePool
+from deserve_worker.kvcache.paged.page_table import PageTableAllocator
 from deserve_worker.kvcache.virtual import VirtualPagePool
 from deserve_worker.layer_storage import LayerManager
 from deserve_worker.model.args import llama_3_70b_args
@@ -36,25 +37,34 @@ if __name__ == "__main__":
     num_layers = sum(layer.count(".") for layer in layers[begin:end])
 
     virtual_page_pool = VirtualPagePool(
-        num_layers, main, swap, 8, torch.device("cuda"), torch.float16
+        num_layers, main, swap, 4, torch.device("cuda"), torch.float16
     )
-    cpu_chunk_pool = CpuChunkPool(num_layers, 18, 8, torch.float16)
-    kvcache_manager = KVCacheManager(virtual_page_pool, cpu_chunk_pool)
+    cpu_chunk_pool = CpuChunkPool(num_layers, 10, 8, torch.float16)
+    page_table_allocator = PageTableAllocator(bsz, 4096, 8, torch.device("cuda"))
+    kvcache_manager = KVCacheManager(
+        virtual_page_pool, cpu_chunk_pool, page_table_allocator
+    )
     task_manager = TaskManager(main, 8)
     processor0 = MicroBatchProcessor(
         kvcache_manager,
         task_manager,
         layer_storage,
+        page_table_allocator,
+        ignore_eos=False,
     )
     processor1 = MicroBatchProcessor(
         kvcache_manager,
         task_manager,
         layer_storage,
+        page_table_allocator,
+        ignore_eos=False,
     )
     processor2 = MicroBatchProcessor(
         kvcache_manager,
         task_manager,
         layer_storage,
+        page_table_allocator,
+        ignore_eos=False,
     )
 
     if begin == 0:
@@ -92,6 +102,7 @@ if __name__ == "__main__":
             initial_seqlen=prefix,
             sampling_params=sparam,
         )
+        task_data.init(prefix)
         task_manager.add(task_data)
         processor0.join([task_data.task_id])
         processor0.step([task_data.task_id], prefill_input, processor1, processor1)
