@@ -72,7 +72,7 @@ class KVCacheManager:
             .to("cuda")
         )
         isswap = torch.zeros(
-            (self.virtual_page_pool.num_pages_swap,),
+            (self.page_table_allocator.max_context_len,),
             device=self.virtual_page_pool.main_device,
             dtype=torch.bool,
         )
