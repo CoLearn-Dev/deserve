@@ -90,6 +90,7 @@ if __name__ == "__main__":
     gpu_page_pool = GpuPagePool(
         num_layers, 9000, 8, torch.device("cuda"), torch.float16
     )
-    print(
-        f"Prefill time: {profile_prefill(layer_storage, gpu_page_pool, page_table_allocator, begin, bsz, prefix)} ms"
-    )
+    for i in range(1, 1024):
+        print(
+            f"Prefill time for {i}: {profile_prefill(layer_storage, gpu_page_pool, page_table_allocator, begin, 1, i)} ms"
+        )

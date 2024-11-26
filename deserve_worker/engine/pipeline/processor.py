@@ -71,7 +71,7 @@ class PipelineProcessor:
             main_dtype,
         )
         self.page_table_allocator = PageTableAllocator(
-            batch_size * num_rounds, 4096, page_size, main_device
+            batch_size * num_rounds * 8, 4096, page_size, main_device
         )
         self.kvcache_manager = KVCacheManager(
             self.virtual_page_pool, self.cpu_chunk_pool, self.page_table_allocator
@@ -160,7 +160,7 @@ class PipelineProcessor:
                 elif isinstance(request, TraceRequest):
                     next_request = self.process_trace(request)
                 if next_request is not None:
-                    self.send_request(next_request)
+                    self.network_executor.submit(self.send_request, next_request)
         except Exception as e:
             traceback.print_exc()
 
@@ -179,6 +179,7 @@ class PipelineProcessor:
             raise ValueError(f"Unknown request type: {request}")
         tensors, metadata = request.into_safetensors()
         result = self.server.send_tensors(url, tensors, metadata)
+        # print(f"Send done: {time.time() * 1000}")
         self.send_bytes_log += request.get_tensors_size()
 
     def send_result(
@@ -228,6 +229,7 @@ class PipelineProcessor:
         self.kvcache_manager.virtual_page_pool.switch()
 
     def process_step(self, request: StepRequest) -> StepRequest:
+        # print(f"Start processing {len(request.exec_task_ids)}: {time.time() * 1000}")
         microbatch = self.microbatches[request.microbatch_id]
         assert request.microbatch_id == self.current_microbatch_id
         self.current_microbatch_id = (self.current_microbatch_id + 1) % self.num_rounds
@@ -264,6 +266,8 @@ class PipelineProcessor:
         )
         microbatch.kvcache_manager.synchronize()
 
+        # print(f"Init done: {time.time() * 1000}")
+
         if len(request.exec_task_ids) > 0:
             microbatch.join(list(request.init_tasks.keys()))
 
@@ -293,6 +297,7 @@ class PipelineProcessor:
             )
             if self.layer_storage.need_sample:
                 request.cancel_task_ids = []
+        # print(f"Launch done: {time.time() * 1000}")
         return request
 
     def process_trace(self, request: TraceRequest) -> Optional[LLMRequest]:

@@ -44,6 +44,7 @@ current_round = 0
 simulated_latency = 0.0
 latency_simulator = ThreadPoolExecutor(max_workers=64)
 lock = threading.Lock()
+counter = 0
 
 
 def convert_name_to_id(name: str, max_layer: int) -> int:
@@ -87,6 +88,10 @@ def add_request(request: StepRequest) -> None:
 
 
 def step(tensors: dict[str, torch.Tensor], metadata: dict[str, Any]) -> None:
+    # global counter
+    # counter += 1
+    # print(f"Step {counter}")
+    # print(f"Received {time.time() * 1000}")
     group_id = metadata["group_id"]
     exec_task_ids = metadata["exec_task_ids"]
     exec_seqlens = metadata["exec_seqlens"]

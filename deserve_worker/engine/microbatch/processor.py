@@ -1,3 +1,4 @@
+import time
 from typing import cast
 
 import torch
@@ -125,6 +126,8 @@ class MicroBatchProcessor:
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_group.pinned_memory, prev_group.pinned_memory
             )
+            # torch.cuda.synchronize()
+            # print(f"Decode step begin: {time.time() * 1000}")
             return decode.step(self.ignore_eos)
         else:
             prefill = BatchPrefill(
@@ -138,6 +141,8 @@ class MicroBatchProcessor:
             self.kvcache_manager.virtual_page_pool.swap2(
                 next_group.pinned_memory, prev_group.pinned_memory
             )
+            # torch.cuda.synchronize()
+            # print(f"Prefill step begin: {time.time() * 1000}")
             return prefill.step(self.ignore_eos)
 
     def synchronize(self) -> None:
