@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -250,6 +251,7 @@ class LayerStorage:
             temp_tokens = torch.cat([temp_tokens, next_token])
 
         temp_tokens = temp_tokens.to("cpu")
+        # print(f"Sample half done: {time.time() * 1000}")
         for i, task_data in enumerate(task_datas):
             if task_data.finished_prefill():
                 sampling_params = task_data.sampling_params
@@ -263,8 +265,6 @@ class LayerStorage:
                 ):
                     done_datas.append(task_data)
                 else:
-                    if next_token[-1] != 70540:
-                        print(f"[{task_data.task_id}] is wrong")
                     ongoing_datas.append(task_data)
                     ongoing_tokens.append(next_token)
         return (

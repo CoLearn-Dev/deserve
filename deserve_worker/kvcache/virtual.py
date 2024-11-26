@@ -1,9 +1,12 @@
 import torch
+from torch.utils.cpp_extension import load
 
 from deserve_worker.kvcache.paged.kvcache import PagedKVCache
 from deserve_worker.kvcache.paged.page_pool import GpuPagePool
 from deserve_worker.kvcache.paged.page_table import PageTableAllocator, PageTableHandle
 from deserve_worker.kvcache.pinned.pinned_memory import PinnedMemory
+
+swap = load(name="swap", sources=["deserve_worker/kvcache/swap.cpp"])
 
 
 class CopiedPinnedMemory(PinnedMemory):
@@ -82,56 +85,14 @@ class VirtualPagePool(GpuPagePool):
         self.swap_bitmap = from_memory.bitmap
         self.swap_count = from_memory.count
         slice = self.slices[off]
-        begin, middle, end = 0, self.num_layers // 2, self.num_layers
-        interval = 1
-
-        with torch.cuda.stream(self.stream):
-            to_memory_view = to_memory.memory.view(
-                self.num_layers, self.num_pages_swap, 2, self.page_size, 8, 128
-            )
-            from_memory_view = from_memory.memory.view(
-                self.num_layers,
-                self.num_pages_swap,
-                2,
-                self.page_size,
-                8,
-                128,
-            )
-            for i in range(begin, middle, interval):
-                start_ptr = i
-                end_ptr = min(middle, i + interval)
-                to_memory_view[start_ptr:end_ptr, :, :, :, :, :].copy_(
-                    self.pages[start_ptr:end_ptr, slice[0] : slice[1], :, :, :, :],
-                    non_blocking=True,
-                )
-                self.pages[start_ptr:end_ptr, slice[0] : slice[1], :, :, :, :].copy_(
-                    from_memory_view[start_ptr:end_ptr, :, :, :, :, :],
-                    non_blocking=True,
-                )
-
-        with torch.cuda.stream(self.stream2):
-            to_memory_view = to_memory.memory.view(
-                self.num_layers, self.num_pages_swap, 2, self.page_size, 8, 128
-            )
-            from_memory_view = from_memory.memory.view(
-                self.num_layers,
-                self.num_pages_swap,
-                2,
-                self.page_size,
-                8,
-                128,
-            )
-            for i in range(middle, end, interval):
-                start_ptr = i
-                end_ptr = min(end, i + interval)
-                to_memory_view[start_ptr:end_ptr, :, :, :, :, :].copy_(
-                    self.pages[start_ptr:end_ptr, slice[0] : slice[1], :, :, :, :],
-                    non_blocking=True,
-                )
-                self.pages[start_ptr:end_ptr, slice[0] : slice[1], :, :, :, :].copy_(
-                    from_memory_view[start_ptr:end_ptr, :, :, :, :, :],
-                    non_blocking=True,
-                )
+        swap.swap(
+            self.pages[:, slice[0] : slice[1], :, :, :, :],
+            to_memory.memory,
+            from_memory.memory,
+            self.stream,
+            self.stream2,
+            2 * 8 * 8 * 128 * (slice[1] - slice[0]),
+        )
 
     def swap(
         self, from_memory: CopiedPinnedMemory, to_memory: CopiedPinnedMemory

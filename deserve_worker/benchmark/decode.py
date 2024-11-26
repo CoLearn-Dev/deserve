@@ -105,7 +105,7 @@ if __name__ == "__main__":
     gpu_page_pool = GpuPagePool(
         num_layers, 9000, 8, torch.device("cuda"), torch.float16
     )
-    page_table_allocator = PageTableAllocator(num_layers, 4096, 8, torch.device("cuda"))
+    page_table_allocator = PageTableAllocator(256, 4096, 8, torch.device("cuda"))
     print(
         f"Decode time: {profile_decode(layer_storage, gpu_page_pool, page_table_allocator, begin, bsz, prefix)} ms",
     )

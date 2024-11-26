@@ -130,7 +130,7 @@ class PipelineScheduler(PipelineProcessor):
                 elif isinstance(request, TraceRequest):
                     next_request = self.process_trace(request)
                 if next_request is not None:
-                    self.send_request(next_request)
+                    self.network_executor.submit(self.send_request, next_request)
         except Exception as e:
             traceback.print_exc()
 
