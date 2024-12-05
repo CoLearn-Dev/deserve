@@ -1,0 +1,63 @@
+[[servers]]
+name = "l40"
+external_ip = "34.169.55.116"
+internal_ip = "10.138.0.19"
+user = "ubuntu"
+begin = "emb"
+end = "10"
+
+[[servers]]
+name = "l41"
+external_ip = "35.233.216.186"
+internal_ip = "10.138.0.22"
+user = "ubuntu"
+begin = "10"
+end = "20"
+
+[[servers]]
+name = "l42"
+external_ip = "34.105.49.12"
+internal_ip = "10.138.0.17"
+user = "ubuntu"
+begin = "20"
+end = "30"
+
+[[servers]]
+name = "l43"
+external_ip = "35.197.36.166"
+internal_ip = "10.138.0.21"
+user = "ubuntu"
+begin = "30"
+end = "40"
+
+[[servers]]
+name = "l44"
+external_ip = "35.233.190.150"
+internal_ip = "10.138.0.20"
+user = "ubuntu"
+begin = "40"
+end = "50"
+
+[[servers]]
+name = "l45"
+external_ip = "35.227.168.53"
+internal_ip = "10.138.0.18"
+user = "ubuntu"
+begin = "50"
+end = "60"
+
+[[servers]]
+name = "l46"
+external_ip = "34.19.12.168"
+internal_ip = "10.138.0.24"
+user = "ubuntu"
+begin = "60"
+end = "70"
+
+[[servers]]
+name = "l47"
+external_ip = "35.230.41.7"
+internal_ip = "10.138.0.23"
+user = "ubuntu"
+begin = "70"
+end = "output"
