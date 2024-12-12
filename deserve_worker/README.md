@@ -16,3 +16,5 @@ python3 -m deserve_worker.worker_api --model=llama-3-70b --num-rounds=2 --layer-
 ```bash 
 python3 -m deserve_worker.worker_api --model=llama-3-70b --num-rounds=2 --layer-begin=40 --layer-end=output --batch-size=48 --port=8081 --num-rounds=2 --num-main-pages=7000 --num-swap-pages=1000 --controller-url=http://localhost:19000 --next-worker-url=http://localhost:8080
 ```
+
+Then you can connect to the first worker with its url.
