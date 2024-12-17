@@ -2,7 +2,7 @@
 
 ## Overview
 
-The experiments will consist of two parts: 
+The setup of experiments will consist of two parts: 
 1. Workers. 
 2. Benchmark clients. 
 
