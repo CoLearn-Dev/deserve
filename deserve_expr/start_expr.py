@@ -93,7 +93,7 @@ if __name__ == "__main__":
                 f"ssh {server['user']}@{server['external_ip']} 'tmux new-session -s deserve -c ~/deserve -d'"
             )
             execute(
-                f"ssh {server['user']}@{server['external_ip']} 'tmux send-keys -t deserve:0 \"conda activate vllm\" C-m'"
+                f"ssh {server['user']}@{server['external_ip']} 'tmux send-keys -t deserve:0 \"conda activate deserve\" C-m'"
             )
             worker_api = f"python3 -m deserve_worker.worker_api --model=llama-3-70b --num-rounds={args.rounds} --layer-begin={server['begin']} --layer-end={server['end']} --batch-size={args.micro_batch_size} --port=8080 --controller-url=http://{controller_ip}:19000 --next-worker-url=http://{next_ip}:8080 --num-main-pages={args.main} --num-swap-pages={args.swap} --simulated-latency={args.latency} --buddy-height={args.buddy_height}"
             if args.enable_chunk_prefill:
@@ -127,10 +127,10 @@ if __name__ == "__main__":
                 f"ssh {head['user']}@{head['external_ip']} 'tmux kill-session -t deserve-benchmark'"
             )
         execute(
-            f"ssh {head['user']}@{head['external_ip']} 'tmux new-session -s deserve-benchmark -c ~/deserve-benchmark -d'"
+            f"ssh {head['user']}@{head['external_ip']} 'tmux new-session -s deserve-benchmark -c ~/deserve/deserve-benchmark -d'"
         )
         execute(
-            f"ssh {head['user']}@{head['external_ip']} 'tmux send-keys -t deserve-benchmark:0 \"conda activate vllm\" C-m'"
+            f"ssh {head['user']}@{head['external_ip']} 'tmux send-keys -t deserve-benchmark:0 \"conda activate deserve\" C-m'"
         )
         execute(
             f"ssh {head['user']}@{head['external_ip']} 'tmux send-keys -t deserve-benchmark:0 \"python3 -m src.benchmark.deserve --batch-size={args.micro_batch_size * args.rounds} --time-limit={args.time_limit} --warmup={args.warmup} --workload={args.workload} --max-tokens={args.max_tokens} > t{args.time_limit}-w{args.warmup}-{args.workload}-mt{args.max_tokens}-lat{args.latency}-main{args.main}-swap{args.swap}-rounds{args.rounds}-mbsz{args.micro_batch_size}-buddy{args.buddy_height}-cp{int(args.enable_chunk_prefill)}-{args.tag}.json\" C-m'"
