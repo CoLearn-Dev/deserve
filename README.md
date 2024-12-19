@@ -13,11 +13,3 @@ DeServe is a offline-serving framework for decentralized inference of large lang
 | DeServe (opt)  | 445.2                 | 434.1                | 458.5  | 457.3  | 456.8  | 442.9   |
 
 To start the experiments, please refer to [deserve_exp/readme.md](deserve_exp/readme.md).
-
-## Citation
-
-If you find this useful in your research, please consider citing:
-
-```
-
-```
