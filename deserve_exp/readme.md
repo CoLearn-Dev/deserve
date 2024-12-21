@@ -66,6 +66,7 @@ Following is the meaning of the arguments:
 - `--controller-url`: the url of the controller, which is the benchmark client in the context of experiments.
 - `--next-worker-url`: the url of the next worker for sending activations/tokens to.
 - `--simulated-latency`: the simulated network latency inside the pipeline.
+- `--buddy-height`: the height of the buddy allocator, which is used for allocating memory on CPU.
 
 To simplify the process of starting workers, we provide a script `start_expr.py` to simultaneously start workers on different GPUs. Please look at the argparser for more details.
 
